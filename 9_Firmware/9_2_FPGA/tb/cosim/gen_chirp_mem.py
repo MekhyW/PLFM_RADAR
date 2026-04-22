@@ -62,12 +62,7 @@ def _parse_radar_params(path):
     macros this script consumes are all integers. Comments / strings /
     concat macros are ignored by the regex.
     """
-    # Matches: `define RP_NAME   <int-literal>  [// comment]
-    pat = re.compile(
-        r"^\s*`define\s+(RP_\w+)\s+"
-        r"(?:(\d+)'[bdh][0-9a-fA-F_]+|0[xX][0-9a-fA-F]+|\d+)"
-    )
-    # Simpler: grab the whole RHS up to comment, then eval as int.
+    # Grab RHS up to an optional `// ...` comment, then parse as int.
     line_pat = re.compile(r"^\s*`define\s+(RP_\w+)\s+([^/\n]+?)(?://.*)?$")
     params = {}
     with open(path) as f:
