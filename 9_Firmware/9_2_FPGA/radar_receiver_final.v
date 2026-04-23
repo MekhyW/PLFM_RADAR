@@ -444,8 +444,8 @@ matched_filter_multi_segment mf_dual (
     .mc_new_chirp(mc_new_chirp),
     .mc_new_elevation(mc_new_elevation),
     .mc_new_azimuth(mc_new_azimuth),
-	 .ref_chirp_real(delayed_ref_i),       // From latency buffer (long or short ref)
-    .ref_chirp_imag(delayed_ref_q),
+	 .ref_chirp_real(ref_chirp_real),      // 1-FF aligned ref (RX-B fix)
+    .ref_chirp_imag(ref_chirp_imag),
     .segment_request(segment_request),
     .mem_request(mem_request),
 	 .sample_addr_out(sample_addr_from_chain),

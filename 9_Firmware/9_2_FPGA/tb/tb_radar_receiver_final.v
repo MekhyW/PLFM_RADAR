@@ -499,10 +499,12 @@ always @(posedge clk_100m) begin
         mf_state_prev = dut.mf_dual.state;
     end
     // Processing chain state changes
+    // Note: fwd_in_count was a SIMULATION-only signal in the deleted inline
+    // behavioural FFT block; the production chain uses collect_count.
     if (dut.mf_dual.m_f_p_c.state != chain_state_prev) begin
-        $display("[CHAIN_DBG t=%0t] chain state: %0d -> %0d (fwd_count=%0d, out_count=%0d)",
+        $display("[CHAIN_DBG t=%0t] chain state: %0d -> %0d (collect_count=%0d, out_count=%0d)",
                  $time, chain_state_prev, dut.mf_dual.m_f_p_c.state,
-                 dut.mf_dual.m_f_p_c.fwd_in_count, dut.mf_dual.m_f_p_c.out_count);
+                 dut.mf_dual.m_f_p_c.collect_count, dut.mf_dual.m_f_p_c.out_count);
         chain_state_prev = dut.mf_dual.m_f_p_c.state;
     end
     // Watch for fft_pc_valid while multi-seg is in ST_WAIT_FFT

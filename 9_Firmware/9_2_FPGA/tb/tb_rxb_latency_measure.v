@@ -152,13 +152,17 @@ module tb_rxb_latency_measure;
             $display("First adc_valid     : cycle %0d", cycle_in_first);
             $display("First valid output  : cycle %0d", cycle_out_first);
             $display("Pipeline latency    : %0d cycles", pipeline_latency);
-            $display("Current LATENCY in latency_buffer: 3187 cycles");
-            $display("Delta (measured - configured): %0d cycles", pipeline_latency - 3187);
             $display("");
-            $display("Interpretation:");
-            $display("  - If delta is near 0, LATENCY=3187 is correct.");
-            $display("  - Note: this measures only the chain's internal pipeline.");
-            $display("    Full LATENCY also accounts for upstream multi_segment buffer fill.");
+            // Behavioural-FFT chain pipeline depth measured at 2057 cycles
+            // (cycle 4 in -> cycle 2061 out). Allow +/-50 cycle drift before
+            // failing — protects against silent regressions in chain timing.
+            if (pipeline_latency >= 2007 && pipeline_latency <= 2107) begin
+                $display("[PASS] Chain pipeline latency = %0d cycles (in expected 2007..2107 range)",
+                         pipeline_latency);
+            end else begin
+                $display("[FAIL] Chain pipeline latency = %0d cycles, expected ~2057 (2007..2107)",
+                         pipeline_latency);
+            end
         end else begin
             $display("\n=== TIMEOUT ===");
             $display("range_profile_valid never asserted within 60000 cycles");

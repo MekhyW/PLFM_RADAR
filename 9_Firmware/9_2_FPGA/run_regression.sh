@@ -69,6 +69,7 @@ PROD_RTL=(
     doppler_processor.v
     xfft_16.v
     fft_engine.v
+    frequency_matched_filter.v
     usb_data_interface.v
     usb_data_interface_ft2232h.v
     edge_detector.v
@@ -84,7 +85,6 @@ PROD_RTL=(
 # (IBUFDS, BUFIO, BUFG, IDDR) that iverilog cannot compile. The production
 # design uses tb/ad9484_interface_400m_stub.v for simulation instead.
 EXTRA_RTL=(
-    frequency_matched_filter.v
 )
 
 # ---------------------------------------------------------------------------
@@ -102,6 +102,7 @@ RECEIVER_RTL=(
     chirp_memory_loader_param.v latency_buffer.v
     matched_filter_multi_segment.v matched_filter_processing_chain.v
     range_bin_decimator.v doppler_processor.v xfft_16.v fft_engine.v
+    frequency_matched_filter.v
     rx_gain_control.v mti_canceller.v
 )
 
@@ -281,7 +282,7 @@ run_mf_cosim() {
     if [[ -n "$define" ]]; then
         cmd="$cmd $define"
     fi
-    cmd="$cmd -o $vvp tb/tb_mf_cosim.v matched_filter_processing_chain.v fft_engine.v chirp_memory_loader_param.v"
+    cmd="$cmd -o $vvp tb/tb_mf_cosim.v matched_filter_processing_chain.v fft_engine.v frequency_matched_filter.v chirp_memory_loader_param.v"
 
     if ! eval "$cmd" 2>/tmp/iverilog_err_$$; then
         echo -e "${RED}COMPILE FAIL${NC}"
@@ -464,14 +465,21 @@ if [[ "$SKIP_LINT" -eq 0 ]]; then
     run_lint_iverilog "production" "${PROD_RTL[@]}"
 
     # Layer A: standalone modules not in top-level hierarchy
-    for extra in "${EXTRA_RTL[@]}"; do
-        if [[ -f "$extra" ]]; then
-            run_lint_iverilog "$(basename "$extra" .v)" "$extra"
-        fi
-    done
+    # (use ${EXTRA_RTL[@]+...} guard so empty array doesn't trip set -u)
+    if [[ ${#EXTRA_RTL[@]} -gt 0 ]]; then
+        for extra in "${EXTRA_RTL[@]}"; do
+            if [[ -f "$extra" ]]; then
+                run_lint_iverilog "$(basename "$extra" .v)" "$extra"
+            fi
+        done
+    fi
 
     # Layer B: custom static regex checks
-    ALL_RTL=("${PROD_RTL[@]}" "${EXTRA_RTL[@]}")
+    if [[ ${#EXTRA_RTL[@]} -gt 0 ]]; then
+        ALL_RTL=("${PROD_RTL[@]}" "${EXTRA_RTL[@]}")
+    else
+        ALL_RTL=("${PROD_RTL[@]}")
+    fi
     run_lint_static "${ALL_RTL[@]}"
 
     echo ""
@@ -629,10 +637,25 @@ run_test "FIR Lowpass" \
     tb/tb_fir_reg.vvp \
     tb/tb_fir_lowpass.v fir_lowpass.v
 
-run_test "Matched Filter Chain" \
+run_test --timeout=600 "Matched Filter Chain" \
     tb/tb_mf_reg.vvp \
     tb/tb_matched_filter_processing_chain.v matched_filter_processing_chain.v \
-    fft_engine.v chirp_memory_loader_param.v
+    fft_engine.v chirp_memory_loader_param.v frequency_matched_filter.v
+
+# RX-B regression coverage: chain pipeline depth + full-chain
+# autocorrelation peak position. Both run the production fft_engine
+# (no SIMULATION-only behavioural FFT exists). Long-running because
+# the production FFT is BRAM-pipelined (~153k cycles per chain pass).
+run_test --timeout=120 "RX-B Chain Pipeline Latency (tb_rxb_latency_measure)" \
+    tb/tb_rxb_lat_reg.vvp \
+    tb/tb_rxb_latency_measure.v matched_filter_processing_chain.v \
+    fft_engine.v frequency_matched_filter.v
+
+run_test --timeout=600 "RX-B Full-Chain Autocorrelation (tb_rxb_fullchain_latency)" \
+    tb/tb_rxb_fc_reg.vvp \
+    tb/tb_rxb_fullchain_latency.v matched_filter_multi_segment.v \
+    matched_filter_processing_chain.v fft_engine.v frequency_matched_filter.v \
+    chirp_memory_loader_param.v
 
 echo ""
 
