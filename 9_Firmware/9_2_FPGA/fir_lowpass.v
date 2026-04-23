@@ -40,8 +40,23 @@ parameter ACCUM_WIDTH = 36;
 // Total latency: 9 cycles from data_valid to data_out_valid
 // (was 7 before BREG+MREG addition — +2 cycles for DSP48 pipelining)
 // Throughput: 1 sample per cycle (fully pipelined)
-// FIR runs at 100 MHz on data decimated 4:1 from 400 MHz — valid samples
-// arrive every ~4 cycles, so the 9-cycle latency is transparent.
+//
+// Input rate: 100 MSPS at clk_100m (data_valid asserted EVERY cycle in
+// steady state). The CIC `_4x` decimator drops 4:1 from clk_400m → 100 M
+// pulses/s, then the cdc_adc_to_processing CDC into clk_100m emits one
+// dst_valid per dst_clk cycle (Gray-toggle handshake at matching rate).
+// A previous comment here claimed "samples arrive every ~4 cycles"; that
+// was wrong — the 4:1 ratio applies between clk_400m and clk_100m, not as
+// further sub-sampling within clk_100m.
+//
+// Implication: this 32-tap FIR's cutoff was designed for a 25 MSPS rate
+// (the post-decimation rate that "every 4 cycles" would imply). Running
+// at 100 MSPS shifts the effective cutoff 4× above that. The system's
+// existing tests pass because the 36-bit accumulator silently wraps on
+// large sustained inputs (giving lowpass-like behaviour by accident) —
+// see the build report and the open RX-NEW-3 design question. Any future
+// DSP-saving rework of this module needs a designer call on the
+// rate-vs-coefficient mismatch.
 // ============================================================================
 
 // Filter coefficients (symmetric: coeff[k] == coeff[31-k])
@@ -102,8 +117,8 @@ end
 // eliminating 68 DPIP-1 + 35 DPOP-2 warnings and improving timing.
 //
 // Pipeline impact: +2 cycles latency (BREG + MREG). Total FIR latency
-// goes from 7 to 9 cycles. Still transparent since FIR input arrives
-// every ~4 clocks (100 MHz / 4:1 CIC decimation).
+// goes from 7 to 9 cycles. Transparent relative to downstream processing
+// (Doppler/MTI operate on accumulated frames, not per-sample).
 // ============================================================================
 
 // Registered coefficients (BREG — absorbed into DSP48E1 B-port register)
