@@ -528,10 +528,11 @@ matched_filter_processing_chain m_f_p_c(
     .adc_data_i(fft_input_i),
     .adc_data_q(fft_input_q),
     .adc_valid(fft_input_valid),// && buffer_processing),
-    
-    // Chirp Selection
-    .chirp_counter(chirp_counter),
-    
+
+    // RX-A1: chain.chirp_counter removed (was unused inside the chain).
+    // multi_segment.chirp_counter input is now formally unused but kept
+    // on the port list for potential future per-chirp sequencing.
+
     // Reference Chirp Memory Interface (single pair — upstream selects long/short)
     .ref_chirp_real(ref_chirp_real),
     .ref_chirp_imag(ref_chirp_imag),

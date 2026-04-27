@@ -87,7 +87,6 @@ reg signed [15:0] ref_mem_q [0:FFT_SIZE-1];
 reg [15:0] adc_data_i;
 reg [15:0] adc_data_q;
 reg        adc_valid;
-reg [5:0]  chirp_counter;
 reg [15:0] ref_chirp_real;
 reg [15:0] ref_chirp_imag;
 
@@ -105,7 +104,6 @@ matched_filter_processing_chain dut (
     .adc_data_i(adc_data_i),
     .adc_data_q(adc_data_q),
     .adc_valid(adc_valid),
-    .chirp_counter(chirp_counter),
     .ref_chirp_real(ref_chirp_real),
     .ref_chirp_imag(ref_chirp_imag),
     .range_profile_i(range_profile_i),
@@ -152,7 +150,6 @@ task apply_reset;
         adc_data_i <= 16'd0;
         adc_data_q <= 16'd0;
         adc_valid <= 1'b0;
-        chirp_counter <= 6'd0;
         ref_chirp_real <= 16'd0;
         ref_chirp_imag <= 16'd0;
         repeat(4) @(posedge clk);

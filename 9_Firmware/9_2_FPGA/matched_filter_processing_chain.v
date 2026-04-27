@@ -18,7 +18,6 @@
  * Interface contract (from matched_filter_multi_segment.v line 361):
  *   .clk, .reset_n
  *   .adc_data_i, .adc_data_q, .adc_valid      <- from input buffer
- *   .chirp_counter                              <- 6-bit frame counter
  *   .ref_chirp_real/imag                     <- reference (time-domain)
  *   .range_profile_i, .range_profile_q, .range_profile_valid -> output
  *   .chain_state                                -> 4-bit status
@@ -50,8 +49,8 @@ module matched_filter_processing_chain (
     input wire [15:0] adc_data_q,
     input wire adc_valid,
 
-    // Chirp counter (for future multi-chirp modes)
-    input wire [5:0] chirp_counter,
+    // RX-A1 (closed 2026-04-27): chirp_counter port removed — never read
+    // inside the chain. multi_segment passed it through to nothing.
 
     // Reference chirp (time-domain, latency-aligned by upstream buffer)
     // Upstream chirp_memory_loader_param selects long/short reference

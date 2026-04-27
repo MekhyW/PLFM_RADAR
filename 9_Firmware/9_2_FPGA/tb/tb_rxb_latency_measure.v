@@ -31,7 +31,6 @@ module tb_rxb_latency_measure;
     reg  signed [15:0] adc_data_i;
     reg  signed [15:0] adc_data_q;
     reg                adc_valid;
-    reg  [5:0]         chirp_counter;
     reg  signed [15:0] ref_chirp_real;
     reg  signed [15:0] ref_chirp_imag;
     wire signed [15:0] range_profile_i;
@@ -45,7 +44,6 @@ module tb_rxb_latency_measure;
         .adc_data_i          (adc_data_i),
         .adc_data_q          (adc_data_q),
         .adc_valid           (adc_valid),
-        .chirp_counter       (chirp_counter),
         .ref_chirp_real      (ref_chirp_real),
         .ref_chirp_imag      (ref_chirp_imag),
         .range_profile_i     (range_profile_i),
@@ -121,7 +119,6 @@ module tb_rxb_latency_measure;
         adc_data_i     = 0;
         adc_data_q     = 0;
         adc_valid      = 0;
-        chirp_counter  = 6'd0;
         ref_chirp_real = 0;
         ref_chirp_imag = 0;
 

@@ -17,7 +17,6 @@ module tb_matched_filter_processing_chain;
     reg  [15:0] adc_data_i;
     reg  [15:0] adc_data_q;
     reg         adc_valid;
-    reg  [5:0]  chirp_counter;
     reg  [15:0] ref_chirp_real;
     reg  [15:0] ref_chirp_imag;
     wire signed [15:0] range_profile_i;
@@ -80,7 +79,6 @@ module tb_matched_filter_processing_chain;
         .adc_data_i       (adc_data_i),
         .adc_data_q       (adc_data_q),
         .adc_valid        (adc_valid),
-        .chirp_counter    (chirp_counter),
         .ref_chirp_real  (ref_chirp_real),
         .ref_chirp_imag  (ref_chirp_imag),
         .range_profile_i  (range_profile_i),
@@ -128,7 +126,6 @@ module tb_matched_filter_processing_chain;
             adc_valid  = 0;
             adc_data_i = 16'd0;
             adc_data_q = 16'd0;
-            chirp_counter   = 6'd0;
             ref_chirp_real = 16'd0;
             ref_chirp_imag = 16'd0;
             cap_enable   = 0;
@@ -439,18 +436,19 @@ module tb_matched_filter_processing_chain;
         check(cap_count == FFT_SIZE, "Frame 2: 2048 outputs");
 
         // ════════════════════════════════════════════════════════
-        // TEST GROUP 8: Chirp counter passthrough
+        // TEST GROUP 8: RX-A1 port-removal smoke test
+        // (was "Chirp counter passthrough"; chain.chirp_counter port
+        //  was removed because it was never read inside the chain.)
         // ════════════════════════════════════════════════════════
-        $display("\n--- Test Group 8: Chirp Counter Passthrough ---");
+        $display("\n--- Test Group 8: RX-A1 — chain runs without chirp_counter port ---");
         apply_reset;
 
-        chirp_counter = 6'd42;
         start_capture;
         feed_dc_frame;
         wait_for_idle;
         cap_enable = 0;
         $display("  Outputs: %0d", cap_count);
-        check(cap_count == FFT_SIZE, "Processes correctly with chirp_counter=42");
+        check(cap_count == FFT_SIZE, "Chain processes a frame after RX-A1 port removal");
 
         // ════════════════════════════════════════════════════════
         // TEST GROUP 9: Signal vs different reference
