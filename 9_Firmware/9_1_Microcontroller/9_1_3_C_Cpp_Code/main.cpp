@@ -2179,16 +2179,25 @@ int main(void)
 		      DIAG("PA", "System temperature (max of 8 sensors) = %.1f C", (double)temperature);
 		  }
 
-		  //(20 mV/°C on TMP37) QPA2962 RF amplifier Operating Temp. Range, TBASE min−40 normal+25 max+85 °C
-		  int Max_Temp = 25;
-		  if((Temperature_1>Max_Temp)||(Temperature_2>Max_Temp)||(Temperature_3>Max_Temp)||(Temperature_4>Max_Temp)
-				  ||(Temperature_5>Max_Temp)||(Temperature_6>Max_Temp)||(Temperature_7>Max_Temp)||(Temperature_8>Max_Temp))
-			{
+		  // MCU-A1: production thermal limits for QPA2962 (TBASE max +85 °C).
+		  // Cooling fan turns ON at 70 °C and OFF at 60 °C — 10 °C hysteresis
+		  // prevents relay/fan chatter near the threshold. The system-level
+		  // hard overtemp gate at checkSystemHealth() (>75 °C → SAFE mode)
+		  // sits above the cooling ON point so the fan gets a chance to act
+		  // before shutdown. Was previously a 25 °C dev-bench stub that kept
+		  // the fan latched on at room temperature.
+		  static bool cooling_on = false;
+		  const float COOLING_ON_C  = 70.0f;
+		  const float COOLING_OFF_C = 60.0f;
+		  float t_max = temperature;  // populated above as max of 8 sensors
+		  if (!cooling_on && t_max > COOLING_ON_C) {
+			  cooling_on = true;
 			  HAL_GPIO_WritePin(EN_DIS_COOLING_GPIO_Port, EN_DIS_COOLING_Pin, GPIO_PIN_SET);
-			  DIAG_WARN("PA", "Over-temp detected (>%d C) -- cooling ENABLED", Max_Temp);
-			}
-		  else{
+			  DIAG_WARN("PA", "Over-temp %.1f C > %.0f C -- cooling ENABLED", (double)t_max, (double)COOLING_ON_C);
+		  } else if (cooling_on && t_max < COOLING_OFF_C) {
+			  cooling_on = false;
 			  HAL_GPIO_WritePin(EN_DIS_COOLING_GPIO_Port, EN_DIS_COOLING_Pin, GPIO_PIN_RESET);
+			  DIAG("PA", "Temp %.1f C < %.0f C -- cooling DISABLED", (double)t_max, (double)COOLING_OFF_C);
 		  }
 
 		  /* [GAP-3 FIX 4] Periodic IDQ re-read — the Idq_reading[] array was only
