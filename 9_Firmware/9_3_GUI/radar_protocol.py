@@ -267,28 +267,40 @@ class RadarProtocol:
         """
         Scan buffer for packet start markers (0xAA data, 0xBB status).
         Returns list of (start_idx, expected_end_idx, packet_type).
+
+        GUI-S1: in addition to header+footer, validate fixed structural
+        bytes the FPGA always emits in known patterns. This rejects false
+        starts where a payload byte happens to be 0xAA/0xBB and the byte
+        DATA/STATUS_PACKET_SIZE later happens to be 0x55:
+          - data byte 9   = {frame_start, 6'b0, cfar_detection} → bits[6:1]==0
+          - status byte 1 = high byte of status_words[0]        → 0xFF
+        Drops false-match probability from 1/256 to ~1/16384 (data) /
+        ~1/65536 (status).
         """
         packets = []
         i = 0
-        while i < len(buf):
+        n = len(buf)
+        while i < n:
             if buf[i] == HEADER_BYTE:
                 end = i + DATA_PACKET_SIZE
-                if end <= len(buf) and buf[end - 1] == FOOTER_BYTE:
+                if end > n:
+                    break  # partial packet at end — leave for residual
+                if (buf[end - 1] == FOOTER_BYTE and
+                        (buf[i + 9] & 0x7E) == 0):
                     packets.append((i, end, "data"))
                     i = end
                 else:
-                    if end > len(buf):
-                        break  # partial packet at end — leave for residual
-                    i += 1  # footer mismatch — skip this false header
+                    i += 1  # structural mismatch — skip this false header
             elif buf[i] == STATUS_HEADER_BYTE:
                 end = i + STATUS_PACKET_SIZE
-                if end <= len(buf) and buf[end - 1] == FOOTER_BYTE:
+                if end > n:
+                    break  # partial status packet — leave for residual
+                if (buf[end - 1] == FOOTER_BYTE and
+                        buf[i + 1] == 0xFF):
                     packets.append((i, end, "status"))
                     i = end
                 else:
-                    if end > len(buf):
-                        break  # partial status packet — leave for residual
-                    i += 1  # footer mismatch — skip
+                    i += 1
             else:
                 i += 1
         return packets

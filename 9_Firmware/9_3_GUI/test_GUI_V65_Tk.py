@@ -276,6 +276,48 @@ class TestRadarProtocol(unittest.TestCase):
         boundaries = RadarProtocol.find_packet_boundaries(buf)
         self.assertEqual(len(boundaries), 0)
 
+    def test_find_boundaries_rejects_false_data_header(self):
+        """GUI-S1: a stray 0xAA followed by 0x55 ten bytes later but with
+        invalid byte-9 structure must NOT be accepted as a packet."""
+        # Forge: header=0xAA, then 8 bytes of payload, byte 9 = 0xFF (bits
+        # [6:1] all set — invalid: real packets have these zeroed),
+        # then 0x55 footer. Old parser would accept; new parser rejects.
+        forged = bytes([0xAA] + [0x00] * 8 + [0xFF, 0x55])
+        real = self._make_data_packet()
+        buf = forged + real
+        boundaries = RadarProtocol.find_packet_boundaries(buf)
+        # Must skip the forged 11 bytes and lock onto the real packet.
+        self.assertEqual(len(boundaries), 1)
+        self.assertEqual(boundaries[0], (11, 22, "data"))
+
+    def test_find_boundaries_rejects_false_status_header(self):
+        """GUI-S1: a stray 0xBB without 0xFF at offset+1 must NOT be
+        accepted as a status packet — even if 0x55 lands 25 bytes later."""
+        forged = bytes([0xBB] + [0x00] * 24 + [0x55])  # byte 1 = 0x00, not 0xFF
+        real = self._make_data_packet()
+        buf = forged + real
+        boundaries = RadarProtocol.find_packet_boundaries(buf)
+        # Forged status rejected; real data packet found 11 bytes in.
+        data_hits = [b for b in boundaries if b[2] == "data"]
+        status_hits = [b for b in boundaries if b[2] == "status"]
+        self.assertEqual(len(status_hits), 0)
+        self.assertEqual(len(data_hits), 1)
+
+    def test_find_boundaries_recovers_after_byte_drop(self):
+        """GUI-S1: simulate a single-byte drop — parser should re-lock on
+        the next intact packet rather than smearing forever."""
+        good = self._make_data_packet(detection=0)
+        # Drop byte 5 of the first packet to mimic USB byte loss.
+        corrupted = good[:5] + good[6:]  # now 10 bytes, no full packet
+        buf = corrupted + good + good  # two intact packets follow
+        boundaries = RadarProtocol.find_packet_boundaries(buf)
+        # We expect to recover and find at least the two intact tails.
+        self.assertGreaterEqual(len(boundaries), 2)
+        # Both recovered packets must be valid data packets.
+        for start, end, ptype in boundaries:
+            self.assertEqual(ptype, "data")
+            self.assertIsNotNone(RadarProtocol.parse_data_packet(buf[start:end]))
+
 
 class TestFT2232HConnection(unittest.TestCase):
     """Test mock FT2232H connection."""
