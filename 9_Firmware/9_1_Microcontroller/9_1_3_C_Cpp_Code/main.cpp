@@ -841,6 +841,44 @@ void attemptErrorRecovery(SystemError_t error) {
             DIAG("SYS", "Recovery: GPS error -- no action (auto-recover on signal)");
             break;
 
+        case ERROR_AD9523_CLOCK:
+            /* MCU-A6: AD9523 lost lock (STATUS0/1 LOW). Assert reset, allow
+             * the chip to settle, then re-run the full configure path —
+             * configure_ad9523() releases reset, selects REFB, and reprograms
+             * registers + waits for lock. If the second attempt also fails
+             * the next health-check pass re-fires ERROR_AD9523_CLOCK and
+             * downstream policy (handleSystemError) decides whether to
+             * escalate; we deliberately do NOT escalate inline so a single
+             * transient brown-out on the 100 MHz reference does not drop
+             * straight into Emergency_Stop. */
+            DIAG("CLK", "Recovery: asserting AD9523 reset");
+            AD9523_RESET_ASSERT();
+            HAL_Delay(10);
+            DIAG("CLK", "Recovery: re-running configure_ad9523()");
+            if (configure_ad9523() != 0) {
+                DIAG_ERR("CLK", "Recovery: configure_ad9523() FAILED -- next health check will re-fire");
+            } else {
+                DIAG("CLK", "Recovery: AD9523 re-configure complete (lock pending verification)");
+            }
+            break;
+
+        case ERROR_FPGA_COMM:
+            /* MCU-A6: FPGA stopped responding (USB-CDC silence, status timeout).
+             * Pulse the FPGA reset line on PD12 LOW->10 ms->HIGH (same pattern
+             * the boot sequence uses, line ~2733). Bitstream re-initializes
+             * from flash. We do NOT touch PA rails here — MCU-N2/N11 already
+             * sequences the cold-boot reset BEFORE PA Vdd, but at runtime the
+             * PAs are live and re-resetting the FPGA briefly leaves
+             * adar_tr_x undefined for ~10 ms. The trade-off is acceptable
+             * vs. losing the radar entirely; if the operator wants a
+             * power-cycle-clean recovery they can issue Emergency_Stop. */
+            DIAG("FPGA", "Recovery: pulsing FPGA reset on PD12 (LOW for 10 ms)");
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+            HAL_Delay(10);
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+            DIAG("FPGA", "Recovery: FPGA reset released -- bitstream reload in progress");
+            break;
+
         default:
             // For other errors, just log and continue
             DIAG_WARN("SYS", "Recovery: No specific handler for error %d", error);
