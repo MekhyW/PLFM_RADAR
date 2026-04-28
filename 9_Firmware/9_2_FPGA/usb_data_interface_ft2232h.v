@@ -967,4 +967,62 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
     end
 end
 
+// ============================================================================
+// TX-N9: payload-hold checker (simulation only)
+//
+// The cmd_* outputs feed a CDC sync chain in the consumer clock domain.
+// Safety property: cmd_data / cmd_opcode / cmd_addr / cmd_value must only
+// change on the cycle that cmd_valid rises (RD_PROCESS in this module).
+// On every other cycle they must be held stable so the receiver's 2-FF
+// synchronizer sees a clean payload regardless of where its sample window
+// lands relative to cmd_valid.
+//
+// The current FSM satisfies this implicitly — the payload regs are only
+// written in RD_PROCESS, never elsewhere — but until now nothing flagged
+// a regression that introduced a stray write somewhere in the always
+// block. This checker fires `[ASSERT FAIL]` on any payload change while
+// cmd_valid is low, surfacing the violation in the simulation log
+// without affecting synthesis.
+// ============================================================================
+`ifdef SIMULATION
+reg [31:0] cmd_data_prev;
+reg  [7:0] cmd_opcode_prev;
+reg  [7:0] cmd_addr_prev;
+reg [15:0] cmd_value_prev;
+reg        cmd_valid_prev;
+
+always @(posedge ft_clk or negedge ft_reset_n) begin
+    if (!ft_reset_n) begin
+        cmd_data_prev   <= 32'd0;
+        cmd_opcode_prev <= 8'd0;
+        cmd_addr_prev   <= 8'd0;
+        cmd_value_prev  <= 16'd0;
+        cmd_valid_prev  <= 1'b0;
+    end else begin
+        // Payload may legally change only on the cycle cmd_valid rises
+        // (cmd_valid_prev=0, cmd_valid=1). Any other change is a hold
+        // violation.
+        if (!cmd_valid && !cmd_valid_prev) begin
+            if (cmd_data   !== cmd_data_prev)
+                $display("[ASSERT FAIL] TX-N9: cmd_data changed while cmd_valid=0 (%h -> %h)",
+                         cmd_data_prev, cmd_data);
+            if (cmd_opcode !== cmd_opcode_prev)
+                $display("[ASSERT FAIL] TX-N9: cmd_opcode changed while cmd_valid=0 (%h -> %h)",
+                         cmd_opcode_prev, cmd_opcode);
+            if (cmd_addr   !== cmd_addr_prev)
+                $display("[ASSERT FAIL] TX-N9: cmd_addr changed while cmd_valid=0 (%h -> %h)",
+                         cmd_addr_prev, cmd_addr);
+            if (cmd_value  !== cmd_value_prev)
+                $display("[ASSERT FAIL] TX-N9: cmd_value changed while cmd_valid=0 (%h -> %h)",
+                         cmd_value_prev, cmd_value);
+        end
+        cmd_data_prev   <= cmd_data;
+        cmd_opcode_prev <= cmd_opcode;
+        cmd_addr_prev   <= cmd_addr;
+        cmd_value_prev  <= cmd_value;
+        cmd_valid_prev  <= cmd_valid;
+    end
+end
+`endif
+
 endmodule

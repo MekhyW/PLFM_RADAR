@@ -682,4 +682,52 @@ end
 assign ft601_clk_out = ft601_clk_in;
 `endif
 
+// ============================================================================
+// TX-N9: payload-hold checker (simulation only)
+//
+// cmd_data / cmd_opcode / cmd_addr / cmd_value feed downstream CDC sync
+// chains; safety property is that they only change on the cycle cmd_valid
+// rises (RD_PROCESS), and are held stable on every other cycle. The FSM
+// satisfies this implicitly today; this checker fires `[ASSERT FAIL]` on
+// any payload change while cmd_valid is low so a future regression is
+// caught in the simulation log. Synthesis-inert.
+// ============================================================================
+`ifdef SIMULATION
+reg [31:0] cmd_data_prev_n9;
+reg  [7:0] cmd_opcode_prev_n9;
+reg  [7:0] cmd_addr_prev_n9;
+reg [15:0] cmd_value_prev_n9;
+reg        cmd_valid_prev_n9;
+
+always @(posedge ft601_clk_in or negedge ft601_reset_n) begin
+    if (!ft601_reset_n) begin
+        cmd_data_prev_n9   <= 32'd0;
+        cmd_opcode_prev_n9 <= 8'd0;
+        cmd_addr_prev_n9   <= 8'd0;
+        cmd_value_prev_n9  <= 16'd0;
+        cmd_valid_prev_n9  <= 1'b0;
+    end else begin
+        if (!cmd_valid && !cmd_valid_prev_n9) begin
+            if (cmd_data   !== cmd_data_prev_n9)
+                $display("[ASSERT FAIL] TX-N9: cmd_data changed while cmd_valid=0 (%h -> %h)",
+                         cmd_data_prev_n9, cmd_data);
+            if (cmd_opcode !== cmd_opcode_prev_n9)
+                $display("[ASSERT FAIL] TX-N9: cmd_opcode changed while cmd_valid=0 (%h -> %h)",
+                         cmd_opcode_prev_n9, cmd_opcode);
+            if (cmd_addr   !== cmd_addr_prev_n9)
+                $display("[ASSERT FAIL] TX-N9: cmd_addr changed while cmd_valid=0 (%h -> %h)",
+                         cmd_addr_prev_n9, cmd_addr);
+            if (cmd_value  !== cmd_value_prev_n9)
+                $display("[ASSERT FAIL] TX-N9: cmd_value changed while cmd_valid=0 (%h -> %h)",
+                         cmd_value_prev_n9, cmd_value);
+        end
+        cmd_data_prev_n9   <= cmd_data;
+        cmd_opcode_prev_n9 <= cmd_opcode;
+        cmd_addr_prev_n9   <= cmd_addr;
+        cmd_value_prev_n9  <= cmd_value;
+        cmd_valid_prev_n9  <= cmd_valid;
+    end
+end
+`endif
+
 endmodule
