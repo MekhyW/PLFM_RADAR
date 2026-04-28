@@ -639,6 +639,17 @@ static SystemError_t last_error = ERROR_NONE;
 static uint32_t error_count = 0;
 static bool system_emergency_state = false;
 
+/* MCU-A5: gate that suppresses Idq overcurrent / bias-fault evaluation in
+ * checkSystemHealth while the boot-time PA calibration walk is running.
+ * The walk starts each channel at DAC_val=126 and steps DOWN; the early
+ * iterations sit well above the 2.5 A overcurrent threshold by design,
+ * and a channel that hits the safety-counter timeout (50 iters) can be
+ * left at >2.5 A. Without this gate, the next periodic health check
+ * trips ERROR_RF_PA_OVERCURRENT → Emergency_Stop. Set TRUE around the
+ * cal loops; checkSystemHealth treats overcurrent/bias as advisory while
+ * set. Temperature, comm, and lock checks remain fully active. */
+static volatile bool pa_calibration_in_progress = false;
+
 // Error handler function
 SystemError_t checkSystemHealth(void) {
     SystemError_t current_error = ERROR_NONE;
@@ -755,7 +766,12 @@ SystemError_t checkSystemHealth(void) {
     }
 
     // 7. Check RF Power Amplifier Current
-    if (PowerAmplifier) {
+    //    MCU-A5: skip the Idq window while pa_calibration_in_progress is set.
+    //    The cal walk starts at DAC_val=126 (well into overcurrent) and steps
+    //    DOWN to the 1.68 A target; mid-walk readings are not a fault. A
+    //    channel left high by the safety-counter timeout is logged separately
+    //    and surfaces on the next post-cal health check.
+    if (PowerAmplifier && !pa_calibration_in_progress) {
         for (int i = 0; i < 16; i++) {
             if (Idq_reading[i] > 2.5f) {
                 current_error = ERROR_RF_PA_OVERCURRENT;
@@ -2030,6 +2046,8 @@ int main(void)
 		  DIAG("PA", "  ADC2 ch%d: raw=%d Idq=%.3fA", channel, adc2_readings[channel], Idq_reading[channel+8]);
 	  }
 
+	  /* MCU-A5: gate Idq health-check window across both DAC1 + DAC2 cal walks. */
+	  pa_calibration_in_progress = true;
 	  DIAG("PA", "Starting Idq calibration loop for DAC1 channels 0-7 (target=1.680A)");
 	  for (uint8_t channel = 0; channel < 8; channel++){
 	      uint8_t safety_counter = 0;
@@ -2069,6 +2087,10 @@ int main(void)
 	      DIAG("PA", "  DAC2 ch%d calibrated: DAC_val=%d Idq=%.3fA iters=%d",
 	           channel, DAC_val, Idq_reading[channel+8], safety_counter);
 	  }
+	  /* MCU-A5: cal walks complete -- re-arm Idq health checks. Any channel
+	   * left out-of-window by safety_counter timeout will surface on the
+	   * next checkSystemHealth pass and route through the normal handler. */
+	  pa_calibration_in_progress = false;
 	  DIAG("PA", "PA IDQ calibration sequence COMPLETE");
   }
 
