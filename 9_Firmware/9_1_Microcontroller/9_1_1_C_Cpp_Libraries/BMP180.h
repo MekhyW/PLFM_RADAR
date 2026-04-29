@@ -137,6 +137,7 @@ class BMP180
 {
  public:
   BMP180(BMP180_RESOLUTION = BMP180_ULTRAHIGHRES);          //BMP180_ULTRAHIGHRES, by default
+  bool    begin(void);                                     //AUDIT-CAL: probe chip + read factory calibration; MUST be called once after I2C is up, before any getTemperature/getPressure call. Returns false on I2C failure or chip-ID mismatch — leaves _calCoeff untouched (so caller can treat sensor as absent).
   int32_t getPressure(void);                               //in Pa
   float   getTemperature(void);                            //in °C
   int32_t getSeaLevelPressure(int16_t trueAltitude = 115); //in Pa, by default true altitude id 115 meters

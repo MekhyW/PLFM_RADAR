@@ -176,6 +176,13 @@ BMP180_ULTRAHIGHRES  - pressure oversampled 8 times & power consumption 12μA, l
 */
 BMP180 myBMP(BMP180_ULTRAHIGHRES);
 float RADAR_Altitude;
+/* AUDIT-CAL: latched true after a successful myBMP.begin() at boot.
+ * Gates the boot-time altitude-baseline loop and the runtime health
+ * watchdog so a missing or unresponsive BMP180 does NOT churn ERROR_BMP180_COMM
+ * every health-check pass and trip the error_count > 10 SAFE-MODE latch.
+ * Without this gate the radar self-shuts-down within ~25 s of boot whenever
+ * the sensor is absent or its calibration could not be read. */
+static bool bmp180_operational = false;
 
 //GPS
 double RADAR_Longitude = 0;
@@ -753,15 +760,23 @@ SystemError_t checkSystemHealth(void) {
     }
 
     // 5. Check BMP180 Communication
+    //
+    // AUDIT-CAL fix: gate on bmp180_operational so an absent or boot-failed
+    // sensor does not churn ERROR_BMP180_COMM (which would trip
+    // error_count > 10 → SAFE-MODE latch within seconds). Also update
+    // last_bmp_check on BOTH success AND error paths — previously it was
+    // only assigned on success, so an out-of-range pressure caused the
+    // watchdog to re-fire every iteration of the main while(1) loop instead
+    // of the intended once-per-15s cadence.
     static uint32_t last_bmp_check = 0;
-    if (HAL_GetTick() - last_bmp_check > 15000) {
+    if (bmp180_operational && (HAL_GetTick() - last_bmp_check > 15000)) {
         double pressure = myBMP.getPressure();
+        last_bmp_check = HAL_GetTick();   // commit the rate-limit window first
         if (pressure < 30000.0 || pressure > 110000.0 || isnan(pressure)) {
             current_error = ERROR_BMP180_COMM;
             DIAG_ERR("SYS", "Health check: BMP180 pressure out of range: %.0f", pressure);
             return current_error;
         }
-        last_bmp_check = HAL_GetTick();
     }
 
     // 6. Check GPS Communication (30s grace period from boot / last valid fix)
@@ -1835,13 +1850,42 @@ int main(void)
     ///////////////////////////////////BAROMETER BMP180////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////
     DIAG_SECTION("BAROMETER INIT (BMP180)");
-    DIAG("IMU", "Reading 5 barometer samples for altitude baseline");
-  	for(int i = 0; i<5 ; i++){
-		float BMP_Perssure = myBMP.getPressure();
-		RADAR_Altitude = 44330*(1-(pow((BMP_Perssure/101325),(1/5.255))));
-		HAL_Delay(100);
-  	}
-    DIAG("IMU", "Barometer init complete, RADAR_Altitude baseline set");
+
+    /* AUDIT-CAL fix: probe the BMP180 over I2C and read its 11 factory calibration
+     * coefficients. The driver was previously instantiated without this step, so
+     * `_calCoeff` ran at zero defaults — `computeB5()` short-circuited via 0/0
+     * (Cortex-M7 SDIV with DIV_0_TRP=0 returns 0 silently), `getPressure()` always
+     * returned the I2C-error sentinel, the health watchdog fired
+     * ERROR_BMP180_COMM every iteration, and `error_count > 10` latched
+     * `system_emergency_state = true` within ~25 s of boot. Try up to 3 times
+     * with 50 ms backoff to ride out a noisy boot-time I2C bus. */
+    bmp180_operational = false;
+    for (int attempt = 0; attempt < 3 && !bmp180_operational; attempt++) {
+        if (myBMP.begin()) {
+            bmp180_operational = true;
+            DIAG("IMU", "BMP180 begin() OK on attempt %d (cal coefficients loaded)", attempt + 1);
+        } else if (attempt < 2) {
+            DIAG_WARN("IMU", "BMP180 begin() failed attempt %d, retrying...", attempt + 1);
+            HAL_Delay(50);
+        }
+    }
+
+    if (bmp180_operational) {
+        DIAG("IMU", "Reading 5 barometer samples for altitude baseline");
+        for (int i = 0; i < 5; i++) {
+            float BMP_Perssure = myBMP.getPressure();
+            RADAR_Altitude = 44330 * (1 - (pow((BMP_Perssure / 101325), (1 / 5.255))));
+            HAL_Delay(100);
+        }
+        DIAG("IMU", "Barometer init complete, RADAR_Altitude baseline set");
+    } else {
+        /* Sensor absent or cal could not be read. Leave RADAR_Altitude at its
+         * default (0.0f) so downstream gps_data telemetry sees a clean value
+         * instead of a NaN propagated from pow(negative, fractional). The
+         * watchdog will skip the BMP180 check (gated on bmp180_operational). */
+        RADAR_Altitude = 0.0f;
+        DIAG_ERR("IMU", "BMP180 begin() FAILED after 3 attempts -- sensor will be marked absent; altitude baseline = 0.0 m; watchdog will skip BMP180 check");
+    }
 
     ///////////////////////////////////////////////////////////////////////////////////
     ///////////////////////////////////////ADF4382/////////////////////////////////////

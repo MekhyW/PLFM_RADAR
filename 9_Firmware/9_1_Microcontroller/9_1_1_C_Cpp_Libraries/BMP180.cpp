@@ -66,6 +66,37 @@ BMP180::BMP180(BMP180_RESOLUTION res_mode)
 
 /**************************************************************************/
 /*
+    begin()
+
+    Probes the BMP180 over I2C, verifies the chip ID, and reads the 11
+    factory calibration coefficients into _calCoeff. MUST be called once
+    after HAL_I2C is initialized and before any getTemperature/getPressure
+    call — without this, _calCoeff stays at zero defaults and computeB5
+    short-circuits via 0/0 to 0, producing bogus output.
+
+    NOT done in the constructor because the constructor runs at C++
+    static-initialization time, before HAL_I2C_Init has been called from
+    main(). Calling I2C from a static initializer is fragile and would
+    silently fail.
+
+    Returns true on success; false on I2C failure or chip-ID mismatch.
+    On failure, _calCoeff is left at its previous value (all zeros after
+    construction) so the caller can treat the sensor as absent and avoid
+    propagating NaN/wild values into downstream consumers.
+*/
+/**************************************************************************/
+bool BMP180::begin(void)
+{
+  /* Probe + chip-ID check first — distinguishes "BMP180 not present"
+   * from "BMP180 present but I2C noisy" so the caller can act differently. */
+  if (readDeviceID() != 180) return false;
+
+  return readCalibrationCoefficients();
+}
+
+
+/**************************************************************************/
+/*
     getPressure()
 
     Calculates compensated pressure, in Pa
