@@ -550,6 +550,10 @@ run_test "FFT AXI Bridge tready handshake (AUDIT-C10)" \
     tb/tb_fft_engine_axi_bridge.vvp \
     tb/tb_fft_engine_axi_bridge.v fft_engine_axi_bridge.v
 
+run_test "FT2232H Frame Drop Counter (AUDIT-C12)" \
+    tb/tb_ft2232h_frame_drop.vvp \
+    tb/tb_ft2232h_frame_drop.v usb_data_interface_ft2232h.v
+
 echo ""
 
 # ===========================================================================

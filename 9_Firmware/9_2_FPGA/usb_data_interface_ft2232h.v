@@ -204,6 +204,12 @@ localparam [3:0] WR_IDLE          = 4'd0,
 
 reg [3:0] wr_state;
 
+// AUDIT-C12 instrumentation: ft_clk → clk handshake. Toggles when WR_FSM
+// completes a successful frame transfer (WR_DONE → WR_IDLE). Lets the clk
+// domain detect frame drops (frame_complete arrives while previous transfer
+// is still in flight). See full analysis in the clk-domain block below.
+reg wr_done_toggle;
+
 // ============================================================================
 // READ FSM STATES (Host → FPGA, ft_clk domain — unchanged from legacy)
 // ============================================================================
@@ -484,21 +490,72 @@ always @(posedge clk or negedge reset_n) begin
             range_write_counter <= {RANGE_BIN_BITS{1'b0}};
         end
 
-        // === Resume filling after ft_clk domain acknowledges frame transfer ===
-        // (handled below via frame_ack_toggle CDC)
-        // For simplicity, we resume filling immediately — the USB transfer reads
-        // from the same BRAM while new data writes. Since the Doppler burst
-        // (0.164 ms) is much shorter than the inter-frame gap (5.6 ms), and USB
-        // transfer (0.875 ms) also fits within the gap, there's no overlap:
-        //   t=0:     frame_complete pulse (1 clk cycle, from edge detector)
-        //   t=0-0.87ms: USB reads BRAM (old frame data is stable)
-        //   t=5.6ms: next Doppler burst starts writing
-        // So single-buffer is safe. Re-enable filling after a short delay.
+        // === Resume filling after frame_complete ===
+        // AUDIT-C12 timing analysis (corrected from earlier comment):
+        //   - Frame period (178 fps): 5.62 ms
+        //   - Doppler emit window: ~0.5 ms at end of frame (16384 cells × 1
+        //     emission/cycle + per-range-bin 16-pt FFT compute, ~50K cycles)
+        //   - USB transfer (Hi-Speed bulk @ 8 MB/s): 35849 bytes / 8 MB/s
+        //     = 4.48 ms (NOT 0.875 ms as the original comment claimed)
+        //   - Slack at 178 fps: 5.62 − 4.48 = 1.14 ms (~20%)
+        //
+        // Write/read order BOTH advance range_bin slowest, doppler_bin fastest;
+        // FPGA write of frame N+1 starts at addr 0 while USB read of frame N is
+        // near addr 16383, so the brief overlap (~0.16 ms at end of WR_DOPPLER)
+        // never collides on the same address. No data corruption today.
+        //
+        // Real failure mode: at higher frame rates (or USB bandwidth shortfalls),
+        // frame_complete N+1 may fire while WR_FSM is still draining frame N.
+        // frame_ready_toggle's edge in the ft_clk domain is missed unless WR_FSM
+        // is in WR_IDLE — frame N+1 silently dropped. The frame_drop_count
+        // counter below makes this loud.
+        //
+        // Filling continues immediately so the next frame's data is captured
+        // (it goes to the same BRAM, possibly stomping on stale frame N data
+        // — but stale-stomp is fine: USB has either read those addresses
+        // already, or it hasn't and will read frame N+1's data at those
+        // addresses, which is what the host wants when frames drop).
         if (!frame_filling && !frame_complete) begin
-            // Re-enable after 1 cycle (frame_complete already deasserted)
-            frame_filling   <= 1'b1;
-            detect_clearing <= 1'b1;  // Clear detection BRAM for next frame
+            frame_filling     <= 1'b1;
+            detect_clearing   <= 1'b1;  // Clear detection BRAM for next frame
             detect_clear_addr <= 14'd0;
+        end
+    end
+end
+
+// ============================================================================
+// AUDIT-C12: frame_pending + frame_drop_count (clk domain)
+// ============================================================================
+// Tracks whether a frame is queued for USB transfer and counts dropped frames
+// (frame_complete fires while previous frame still in WR_FSM transit). The
+// counter is exposed in status_words[5] for host visibility.
+//
+// CDC: wr_done_toggle (ft_clk) flips on every WR_DONE → WR_IDLE; we 3-stage
+// sync into clk and edge-detect to clear frame_pending.
+// ============================================================================
+reg        frame_pending;
+reg [6:0]  frame_drop_count;   // 7-bit, saturates at 127
+
+(* ASYNC_REG = "TRUE" *) reg [2:0] wr_done_sync;
+reg                                wr_done_prev;
+wire                               wr_done_pulse = wr_done_sync[2] ^ wr_done_prev;
+
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin
+        frame_pending    <= 1'b0;
+        frame_drop_count <= 7'd0;
+        wr_done_sync     <= 3'b000;
+        wr_done_prev     <= 1'b0;
+    end else begin
+        wr_done_sync <= {wr_done_sync[1:0], wr_done_toggle};
+        wr_done_prev <= wr_done_sync[2];
+
+        if (frame_complete) begin
+            if (frame_pending && frame_drop_count != 7'd127)
+                frame_drop_count <= frame_drop_count + 7'd1;
+            frame_pending <= 1'b1;
+        end else if (wr_done_pulse) begin
+            frame_pending <= 1'b0;
         end
     end
 end
@@ -532,6 +589,10 @@ wire status_req_ft  = status_toggle_sync[2] ^ status_toggle_prev;
 // --- Stream control CDC (6-bit, 2-stage level sync) ---
 (* ASYNC_REG = "TRUE" *) reg [5:0] stream_ctrl_sync_0;
 (* ASYNC_REG = "TRUE" *) reg [5:0] stream_ctrl_sync_1;
+
+// --- AUDIT-C12: frame_drop_count CDC (slow-changing 7-bit value, 2-stage sync) ---
+(* ASYNC_REG = "TRUE" *) reg [6:0] frame_drop_sync_0;
+reg [6:0]                          frame_drop_sync_1;
 
 wire stream_range_en   = stream_ctrl_sync_1[0];
 wire stream_doppler_en = stream_ctrl_sync_1[1];
@@ -645,6 +706,8 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         status_toggle_prev <= 1'b0;
         stream_ctrl_sync_0 <= `RP_STREAM_CTRL_DEFAULT;
         stream_ctrl_sync_1 <= `RP_STREAM_CTRL_DEFAULT;
+        frame_drop_sync_0  <= 7'd0;
+        frame_drop_sync_1  <= 7'd0;
         for (si = 0; si < 6; si = si + 1)
             status_words[si] <= 32'd0;
         wr_state       <= WR_IDLE;
@@ -671,6 +734,7 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         cmd_opcode     <= 8'd0;
         cmd_addr       <= 8'd0;
         cmd_value      <= 16'd0;
+        wr_done_toggle <= 1'b0;
     end else begin
         cmd_valid <= 1'b0;
 
@@ -683,6 +747,10 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         // Stream control CDC
         stream_ctrl_sync_0 <= stream_control;
         stream_ctrl_sync_1 <= stream_ctrl_sync_0;
+
+        // AUDIT-C12: frame_drop_count CDC (clk → ft_clk for status read)
+        frame_drop_sync_0 <= frame_drop_count;
+        frame_drop_sync_1 <= frame_drop_sync_0;
 
         // Status snapshot on request
         if (status_req_ft) begin
@@ -700,7 +768,11 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                                 status_chirps_mismatch,         // [10] TX-G mismatch flag
                                 8'd0,                           // [9:2] reserved
                                 status_range_mode};             // [1:0]
-            status_words[5] <= {7'd0, status_self_test_busy,
+            // AUDIT-C12: frame_drop_count exposed at status_words[5][31:25]
+            // (was 7'd0 reserved). Saturates at 127. Counts frame_complete
+            // events that arrived while previous frame was still in WR_FSM
+            // transit (silent frame drop indicator for host visibility).
+            status_words[5] <= {frame_drop_sync_1, status_self_test_busy,
                                 8'd0, status_self_test_detail,
                                 3'd0, status_self_test_flags};
         end
@@ -977,9 +1049,10 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                 end
 
                 WR_DONE: begin
-                    ft_wr_n    <= 1'b1;
-                    ft_data_oe <= 1'b0;
-                    wr_state   <= WR_IDLE;
+                    ft_wr_n        <= 1'b1;
+                    ft_data_oe     <= 1'b0;
+                    wr_done_toggle <= ~wr_done_toggle;  // AUDIT-C12: signal frame transfer complete to clk domain
+                    wr_state       <= WR_IDLE;
                 end
 
                 default: wr_state <= WR_IDLE;
@@ -1066,6 +1139,30 @@ always @(posedge clk) begin
             $display("[ASSERT FAIL] AUDIT-C9: stream_mag_only=0; full-I/Q write FSM not implemented");
         if (stream_sparse_det !== 1'b0)
             $display("[ASSERT FAIL] AUDIT-C9: stream_sparse_det=1; sparse-list write FSM not implemented");
+    end
+end
+`endif
+
+// ============================================================================
+// AUDIT-S22: cfar_valid-vs-RMW-busy checker (simulation only)
+//
+// Detection RMW (idle→read→write-back) takes 3 cycles. cfar_ca emits one
+// detect_valid pulse per 3 cycles (THR/MUL/CMP pipeline). They match by
+// construction today — line 469 silently rejects cfar_valid arriving when
+// detect_rmw_state != 0, which never fires at the current cadence.
+//
+// If cfar_ca is ever optimized to <3-cycle cadence (e.g., merging MUL+CMP,
+// flagged as a possible target in cfar_ca.v), the silent rejection becomes
+// a silent detection-drop. This assertion makes that violation loud, so the
+// regression suite catches the coupling on the day someone speeds CFAR up
+// without also pipelining the RMW. Synthesis-inert.
+// ============================================================================
+`ifdef SIMULATION
+always @(posedge clk) begin
+    if (reset_n && cfar_valid && frame_filling && !detect_clearing &&
+        detect_rmw_state != 2'd0) begin
+        $display("[ASSERT FAIL] AUDIT-S22: cfar_valid arrived while RMW busy (state=%0d) — detection at range_bin=%0d doppler_bin=%0d dropped",
+                 detect_rmw_state, range_bin_in, doppler_bin_in);
     end
 end
 `endif

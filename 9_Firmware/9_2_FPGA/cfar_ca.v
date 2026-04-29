@@ -51,6 +51,21 @@
  *   = 0.55 ms. Frame period @ PRF=1932 Hz, 32 chirps = 16.6 ms. Fits easily.
  *   (3 cycles per CUT due to pipeline: THR → MUL → CMP)
  *
+ * AUDIT-S22 — DOWNSTREAM CADENCE DEPENDENCY (DO NOT BREAK):
+ *   detect_valid pulses every 3rd cycle (one per CUT triplet). The downstream
+ *   consumer usb_data_interface_ft2232h.v runs a 3-cycle read-modify-write
+ *   on the detection-flag BRAM (idle → read-wait → write-back) and silently
+ *   drops cfar_valid arriving while RMW is busy. The two cadences match
+ *   today by construction.
+ *
+ *   If you optimize this pipeline below 3 cycles per CUT (e.g., merging
+ *   ST_CFAR_MUL+CMP into a single state, or feeding the comparator
+ *   combinationally), you MUST also pipeline the RMW in
+ *   usb_data_interface_ft2232h.v to keep up — otherwise every Nth
+ *   detection is silently lost. A SIMULATION-only assertion in that
+ *   module fires `[ASSERT FAIL] AUDIT-S22: cfar_valid arrived while RMW
+ *   busy` to catch this regression in the test suite.
+ *
  * Resources:
  *   - 1 BRAM36K for magnitude buffer (16384 x 17 bits)
  *   - 1 DSP48 for alpha multiply
