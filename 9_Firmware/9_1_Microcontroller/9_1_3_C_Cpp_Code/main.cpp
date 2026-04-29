@@ -646,6 +646,12 @@ typedef enum {
     ERROR_TEMPERATURE_HIGH,
     ERROR_MEMORY_ALLOC,
     ERROR_WATCHDOG_TIMEOUT,
+    /* AUDIT-S10 follow-up: gpio_dig7 (PD15) reports FPGA DSP control faults
+     * (range-decimator watchdog, CIC->FIR CDC overrun). Placed AFTER the
+     * ERROR_RF_PA_OVERCURRENT..ERROR_POWER_SUPPLY critical range so the
+     * dispatcher routes to attemptErrorRecovery (FPGA reset pulse) instead
+     * of Emergency_Stop. */
+    ERROR_FPGA_DSP_STALL,
     ERROR_COUNT  // must be last — used for bounds checking error_strings[]
 } SystemError_t;
 
@@ -840,6 +846,42 @@ SystemError_t checkSystemHealth(void) {
 
     // 9. Watchdog check is performed at function entry (see step 0).
 
+    // 10. AUDIT-S10 follow-up: FPGA DSP control-fault flag (PD15 / FPGA_DIG7).
+    //     gpio_dig7 = (range_decim_watchdog | cic_fir_overrun), sticky in the
+    //     FPGA source domain until a full bitstream reset clears it. Distinct
+    //     from PD13 (signal-saturation; AGC reacts) — these are control-path
+    //     stalls requiring an FPGA reset, not a gain change. AGC was previously
+    //     mis-reacting to these on the old aggregated PD13 line.
+    //
+    //     Recovery: attemptErrorRecovery(ERROR_FPGA_DSP_STALL) pulses PD12 to
+    //     reload the bitstream — that clears all sticky monitors as a side
+    //     effect (no MCU-driven reset_monitors path exists).
+    //
+    //     Debounce: 2 consecutive HIGH samples on a 1 s cadence so a single
+    //     glitch does not provoke an FPGA reset. Counter restarts at 0 once
+    //     fired (and naturally resets when PD15 goes LOW after reset).
+    //     last_dsp_check is committed BEFORE the early return per the
+    //     AUDIT-CAL pattern, so a flapping fault never bypasses rate-limit.
+    static uint32_t last_dsp_check = 0;
+    static uint8_t  dsp_stall_streak = 0;
+    if (HAL_GetTick() - last_dsp_check > 1000) {
+        last_dsp_check = HAL_GetTick();
+        bool dsp_fault = (HAL_GPIO_ReadPin(FPGA_DIG7_GPIO_Port,
+                                           FPGA_DIG7_Pin) == GPIO_PIN_SET);
+        if (dsp_fault) {
+            if (dsp_stall_streak < 2) dsp_stall_streak++;
+        } else {
+            dsp_stall_streak = 0;
+        }
+        if (dsp_stall_streak >= 2) {
+            dsp_stall_streak = 0;          // arm for next assertion post-recovery
+            current_error = ERROR_FPGA_DSP_STALL;
+            DIAG_ERR("FPGA",
+                "Health check: gpio_dig7 (PD15) HIGH 2x — DSP control fault");
+            return current_error;
+        }
+    }
+
     if (current_error != ERROR_NONE) {
         DIAG_ERR("SYS", "checkSystemHealth returning error code %d", current_error);
     }
@@ -908,15 +950,23 @@ void attemptErrorRecovery(SystemError_t error) {
             break;
 
         case ERROR_FPGA_COMM:
-            /* MCU-A6: FPGA stopped responding (USB-CDC silence, status timeout).
-             * Pulse the FPGA reset line on PD12 LOW->10 ms->HIGH (same pattern
-             * the boot sequence uses, line ~2733). Bitstream re-initializes
-             * from flash. We do NOT touch PA rails here — MCU-N2/N11 already
-             * sequences the cold-boot reset BEFORE PA Vdd, but at runtime the
-             * PAs are live and re-resetting the FPGA briefly leaves
-             * adar_tr_x undefined for ~10 ms. The trade-off is acceptable
-             * vs. losing the radar entirely; if the operator wants a
-             * power-cycle-clean recovery they can issue Emergency_Stop. */
+        case ERROR_FPGA_DSP_STALL:
+            /* MCU-A6 + AUDIT-S10 follow-up:
+             *   ERROR_FPGA_COMM: FPGA stopped responding (USB-CDC silence,
+             *     status timeout).
+             *   ERROR_FPGA_DSP_STALL: gpio_dig7 (PD15) HIGH for 2+ samples;
+             *     range_decim_watchdog or cic_fir_overrun is sticky in the
+             *     FPGA source domain. No standalone MCU->FPGA reset_monitors
+             *     path exists, so the cheapest recovery is a full bitstream
+             *     reload — same PD12 pulse as ERROR_FPGA_COMM, which clears
+             *     all sticky monitors as a side effect.
+             * Pulse FPGA reset line PD12 LOW->10 ms->HIGH (same pattern as
+             * boot sequence, line ~2733). Bitstream re-initializes from flash.
+             * We do NOT touch PA rails — MCU-N2/N11 sequences cold-boot reset
+             * BEFORE PA Vdd, but at runtime the PAs are live and re-resetting
+             * the FPGA briefly leaves adar_tr_x undefined for ~10 ms. The
+             * trade-off is acceptable vs losing the radar entirely; for a
+             * power-cycle-clean recovery the operator can issue Emergency_Stop. */
             DIAG("FPGA", "Recovery: pulsing FPGA reset on PD12 (LOW for 10 ms)");
             HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
             HAL_Delay(10);
@@ -1108,7 +1158,8 @@ void handleSystemError(SystemError_t error) {
         "Power supply fault",
         "System temperature high",
         "Memory allocation failed",
-        "Watchdog timeout"
+        "Watchdog timeout",
+        "FPGA DSP control fault"
     };
 
     static_assert(sizeof(error_strings) / sizeof(error_strings[0]) == ERROR_COUNT,

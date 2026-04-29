@@ -75,6 +75,7 @@ TESTS_STANDALONE := test_bug12_pa_cal_loop_inverted \
                     test_audit_c17_bmp180_sentinel_and_cast \
                     test_audit_cal_bmp180_begin \
                     test_audit_imu_watchdog_cadence \
+                    test_audit_s10_dsp_stall_polling \
                     test_gap3_iwdg_config \
                     test_gap3_temperature_max \
                     test_gap3_idq_periodic_reread \
@@ -193,6 +194,9 @@ test_audit_cal_bmp180_begin: test_audit_cal_bmp180_begin.c
 	$(CC) $(CFLAGS) $< -o $@
 
 test_audit_imu_watchdog_cadence: test_audit_imu_watchdog_cadence.c
+	$(CC) $(CFLAGS) $< -o $@
+
+test_audit_s10_dsp_stall_polling: test_audit_s10_dsp_stall_polling.c
 	$(CC) $(CFLAGS) $< -o $@
 
 # Gap-3 safety tests -- mock-only (needs spy log for GPIO sequence)
