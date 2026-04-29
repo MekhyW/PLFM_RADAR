@@ -690,8 +690,14 @@ SystemError_t checkSystemHealth(void) {
     }
 
     // 1. Check AD9523 Clock Generator
+    //
+    // AUDIT-CAL follow-up: update last_clock_check on BOTH success and error
+    // paths; pre-fix the assignment was below the early return so a STATUS0/1
+    // RESET would re-fire ERROR_AD9523_CLOCK every main-loop iteration. Same
+    // bug class as AUDIT-CAL (BMP180 watchdog at main.cpp:771-780).
     static uint32_t last_clock_check = 0;
     if (HAL_GetTick() - last_clock_check > 5000) {
+        last_clock_check = HAL_GetTick();   // commit the rate-limit window first
         GPIO_PinState s0 = HAL_GPIO_ReadPin(AD9523_STATUS0_GPIO_Port, AD9523_STATUS0_Pin);
         GPIO_PinState s1 = HAL_GPIO_ReadPin(AD9523_STATUS1_GPIO_Port, AD9523_STATUS1_Pin);
         DIAG_GPIO("CLK", "AD9523 STATUS0", s0);
@@ -701,7 +707,6 @@ SystemError_t checkSystemHealth(void) {
             DIAG_ERR("CLK", "AD9523 clock health check FAILED (STATUS0=%d STATUS1=%d)", s0, s1);
             return current_error;
         }
-        last_clock_check = HAL_GetTick();
     }
 
     // 2. Check ADF4382 Lock Status
@@ -726,8 +731,20 @@ SystemError_t checkSystemHealth(void) {
     // the comm check to every 2 s (matches the clock-check pattern at line
     // 658). readTemperature() is single-register SPI read with no HAL_Delay,
     // so it stays per-loop to keep PA over-temperature detection responsive.
+    // AUDIT-CAL follow-up: commit the comm-check rate-limit window BEFORE the
+    // for-loop, not after. Pre-fix, the `last_adar_comm_check = HAL_GetTick();`
+    // sat below the loop so any early return (comm fail, overtemp) skipped it
+    // and the 2 s rate-limit became broken — every subsequent main-loop
+    // iteration re-ran the SCRATCHPAD verify+HAL_Delay sequence (4 ms blocking
+    // SPI per device × 4 devices = 16 ms of chirp jitter per iteration), AND
+    // re-fired ERROR_ADAR1000_COMM. Overtemp is intentionally per-loop (not
+    // rate-limited) so PA over-temperature stays responsive; that path is
+    // unaffected by this fix.
     static uint32_t last_adar_comm_check = 0;
     bool run_comm_check = (HAL_GetTick() - last_adar_comm_check > 2000);
+    if (run_comm_check) {
+        last_adar_comm_check = HAL_GetTick();   // commit window first
+    }
     for (int i = 0; i < 4; i++) {
         if (run_comm_check) {
             if (!adarManager.verifyDeviceCommunication(i)) {
@@ -744,19 +761,25 @@ SystemError_t checkSystemHealth(void) {
             return current_error;
         }
     }
-    if (run_comm_check) {
-        last_adar_comm_check = HAL_GetTick();
-    }
 
     // 4. Check IMU Communication
+    //
+    // AUDIT-CAL follow-up: update last_imu_check on BOTH success and error
+    // paths so a transient IMU failure (I2C noise / cable pull) does not
+    // re-fire ERROR_IMU_COMM every main-loop iteration. Pre-fix, the
+    // assignment was below the early return and only ran on success — once
+    // GY85_Update started failing, the 10 s rate-limit never engaged and
+    // ~10 main-loop iterations later error_count > 10 latched
+    // system_emergency_state per MCU-N1. Same bug class as AUDIT-CAL
+    // (BMP180 watchdog at main.cpp:771-780); same fix pattern.
     static uint32_t last_imu_check = 0;
     if (HAL_GetTick() - last_imu_check > 10000) {
+        last_imu_check = HAL_GetTick();   // commit the rate-limit window first
         if (!GY85_Update(&imu)) {
             current_error = ERROR_IMU_COMM;
             DIAG_ERR("IMU", "Health check: GY85_Update() FAILED");
             return current_error;
         }
-        last_imu_check = HAL_GetTick();
     }
 
     // 5. Check BMP180 Communication
