@@ -6,14 +6,20 @@
  * Pulse compression processing chain for AERIS-10 FMCW radar.
  * Implements: FFT(signal) → FFT(reference) → Conjugate multiply → IFFT
  *
- * Uses the in-house fft_engine.v (Radix-2 DIT, BRAM-backed) instantiated
- * once and reused 3 times per frame, plus frequency_matched_filter.v for
- * the pipelined conjugate multiply. Same code path runs in iverilog
- * simulation and Vivado synthesis.
+ * FFT is provided by fft_engine_axi_bridge — a port-compatible wrapper
+ * around xfft_2048, which selects between the Xilinx LogiCORE FFT v9.1 IP
+ * (synth + Vivado XSim, when FFT_USE_XILINX_IP is defined; pipelined
+ * streaming, ~N+150 cycles/pass) and the in-house fft_engine batched
+ * fallback (iverilog only, ~150K cycles/pass — sim coverage only).
+ * Production builds set FFT_USE_XILINX_IP in scripts/{50t,200t}/build_*.tcl.
+ * A single bridge instance is reused 3 times per frame; the conjugate
+ * multiply between the two forward FFTs is done in
+ * frequency_matched_filter.v (4-stage pipeline).
  *
- * (An earlier `ifdef SIMULATION inline behavioural FFT was removed in
- *  RX-NEW-1 fix 2026-04-23 — it produced wrong-bin peaks and weak
- *  magnitudes that masked real correctness checks. See git history.)
+ * History: an `ifdef SIMULATION inline behavioural FFT was removed in
+ * RX-NEW-1 (2026-04-23) — wrong-bin peaks masked real checks. The
+ * LogiCORE swap landed later under RX-NEW-3 to close the PRI budget by
+ * replacing the iterative in-house engine with pipelined streaming.
  *
  * Interface contract (from matched_filter_multi_segment.v line 361):
  *   .clk, .reset_n
@@ -26,16 +32,20 @@
  * Data format:  16-bit signed (Q15 fixed-point)
  * FFT size:     2048 points (parameterized via radar_params.vh)
  *
- * Pipeline states:
- *   IDLE -> FWD_FFT (collect 2048 samples + bit-reverse copy)
- *        -> FWD_BUTTERFLY (forward FFT of signal)
- *        -> REF_BITREV (bit-reverse copy reference into work arrays)
- *        -> REF_BUTTERFLY (forward FFT of reference)
- *        -> MULTIPLY (conjugate multiply in freq domain)
- *        -> INV_BITREV (bit-reverse copy product)
- *        -> INV_BUTTERFLY (inverse FFT + 1/N scaling)
- *        -> OUTPUT (stream 2048 samples)
+ * Pipeline states (FSM at lines 98-108):
+ *   IDLE -> COLLECT  (capture FFT_SIZE ADC + reference samples)
+ *        -> SIG_FFT  (feed signal into bridge, run forward FFT)
+ *        -> SIG_CAP  (capture signal FFT output into sig_buf)
+ *        -> REF_FFT  (feed reference, run forward FFT)
+ *        -> REF_CAP  (capture reference FFT output into ref_buf)
+ *        -> MULTIPLY (conjugate multiply, into prod_buf)
+ *        -> INV_FFT  (feed product, run inverse FFT)
+ *        -> INV_CAP  (capture IFFT output into prod_buf)
+ *        -> OUTPUT   (stream FFT_SIZE pulse-compressed samples)
  *        -> DONE -> IDLE
+ *
+ *   Bit-reversal is handled inside the FFT IP (and the iverilog fallback);
+ *   no explicit bit-reverse stage in this FSM.
  */
 
 `include "radar_params.vh"
@@ -68,13 +78,15 @@ module matched_filter_processing_chain (
 );
 
 // ============================================================================
-// IMPLEMENTATION — Radix-2 DIT FFT via fft_engine
+// IMPLEMENTATION — freq-domain MF via fft_engine_axi_bridge → xfft_2048
 // ============================================================================
-// Uses a single fft_engine instance (2048-pt) reused 3 times:
-//   1. Forward FFT of signal
-//   2. Forward FFT of reference
-//   3. Inverse FFT of conjugate product
-// Conjugate multiply done via frequency_matched_filter (4-stage pipeline).
+// One fft_engine_axi_bridge (2048-pt) instance, reused 3 times per frame:
+//   1. Forward FFT of signal     (inverse=0)
+//   2. Forward FFT of reference  (inverse=0)
+//   3. Inverse FFT of product    (inverse=1)
+// Bridge wraps xfft_2048, which selects LogiCORE FFT v9.1 in synth/XSim
+// (FFT_USE_XILINX_IP defined) or the in-house fft_engine fallback in
+// iverilog. Conjugate multiply in frequency_matched_filter (4-stage pipeline).
 //
 // Buffer scheme (BRAM-inferrable):
 //   sig_buf[2048]:  ADC input -> signal FFT output
@@ -82,8 +94,8 @@ module matched_filter_processing_chain (
 //   prod_buf[2048]: Conjugate multiply output -> IFFT output
 //
 // Memory access is INSIDE always @(posedge clk) blocks (no async reset)
-// using local blocking variables. This eliminates NBA race conditions
-// and enables Vivado BRAM inference (same pattern as fft_engine.v).
+// using local blocking variables. Eliminates NBA race conditions and
+// enables Vivado BRAM inference.
 //
 // BRAM read latency (1 cycle) is handled by "primed" flags:
 //   feed_primed  — for FFT feed operations
