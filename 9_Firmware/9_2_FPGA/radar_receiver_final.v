@@ -69,6 +69,10 @@ module radar_receiver_final (
     input wire stm32_new_elevation_rx,
     input wire stm32_new_azimuth_rx,
 
+    // PR-E: master mixers_enable in clk_100m domain — gates the scheduler
+    // so it stays in S_IDLE until the operator turns the radar on.
+    input wire mixers_enable_100m,
+
     // CFAR integration: expose Doppler frame_complete to top level
     output wire doppler_frame_done_out,
 
@@ -118,7 +122,15 @@ module radar_receiver_final (
     // silent sample drop between the 400 MHz CIC output and the 100 MHz
     // FIR input; stays high until the next reset. OR'd into the GPIO
     // diagnostic bit at the top level.
-    output wire        ddc_cic_fir_overrun
+    output wire        ddc_cic_fir_overrun,
+
+    // chirp_scheduler outputs exposed for the TX-side CDC bridge (PR-E).
+    // sched_chirp_pulse: 1-cycle pulse on clk that announces "begin chirp now"
+    // sched_wave_sel:    waveform identity rail valid alongside chirp_pulse
+    // sched_frame_pulse: 1-cycle pulse on frame boundary (chirp_counter wrap)
+    output wire [1:0] sched_wave_sel_out,
+    output wire       sched_chirp_pulse_out,
+    output wire       sched_frame_pulse_out
 );
 
 // ========== INTERNAL SIGNALS ==========
@@ -215,6 +227,7 @@ wire mti_first_chirp;
 //    wired here — the V2 sub-frame structure uses RP_DEF_CHIRPS_PER_SUBFRAME
 //    (16) and PR-G renames the host register.
 chirp_scheduler sched (
+    .mixers_enable(mixers_enable_100m),
     .clk(clk),
     .reset_n(reset_n),
     .host_mode(host_mode),
@@ -250,6 +263,14 @@ chirp_scheduler sched (
     .track_beam_az(sched_track_beam_az),
     .track_beam_el(sched_track_beam_el)
 );
+
+// PR-E: forward scheduler pulses + wave_sel to the TX-side CDC bridge in
+// radar_system_top. The transmitter does its own clk_100m → clk_120m_dac
+// crossing via cdc_async_fifo + toggle CDC.
+assign sched_wave_sel_out    = wave_sel;
+assign sched_chirp_pulse_out = chirp_pulse;
+assign sched_frame_pulse_out = frame_pulse;
+
 wire clk_400m;
 
 // NOTE: lvds_to_cmos_400m removed — ad9484_interface_400m now provides

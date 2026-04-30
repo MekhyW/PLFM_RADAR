@@ -177,6 +177,12 @@ wire [5:0] tx_current_chirp;       // In clk_120m_dac domain
 wire [5:0] tx_current_chirp_sync;  // Synchronized to clk_100m domain
 wire tx_current_chirp_sync_valid;
 
+// PR-E: scheduler outputs from receiver_final, in clk_100m domain.
+// Routed directly into radar_transmitter, which owns the 100→120 CDC.
+wire [1:0] sched_wave_sel;
+wire       sched_chirp_pulse;
+wire       sched_frame_pulse;
+
 // Receiver internal signals
 wire [31:0] rx_doppler_output;
 wire rx_doppler_valid;
@@ -489,12 +495,16 @@ radar_transmitter tx_inst (
     .rx_mixer_en(rx_mixer_en),
     .tx_mixer_en(tx_mixer_en),
     
-    // STM32 Control Interface
-    .stm32_new_chirp(stm32_new_chirp),
+    // Scheduler bridge (chirp-v2 PR-E): clk_100m signals from receiver_final
+    .sched_wave_sel(sched_wave_sel),
+    .sched_chirp_pulse(sched_chirp_pulse),
+    .sched_frame_pulse(sched_frame_pulse),
+
+    // STM32 Control Interface (chirp moved to scheduler — only beam-step here)
     .stm32_new_elevation(stm32_new_elevation),
     .stm32_new_azimuth(stm32_new_azimuth),
     .stm32_mixers_enable(stm32_mixers_enable),
-    
+
     // RF Switch Control
     .fpga_rf_switch(fpga_rf_switch),
     
@@ -594,6 +604,8 @@ radar_receiver_final rx_inst (
     .stm32_new_chirp_rx(stm32_new_chirp),
     .stm32_new_elevation_rx(stm32_new_elevation),
     .stm32_new_azimuth_rx(stm32_new_azimuth),
+    // PR-E: master enable for the scheduler (CDC-sync'd to clk_100m above)
+    .mixers_enable_100m(stm32_mixers_enable_100m),
     // CFAR: Doppler frame-complete pulse
     .doppler_frame_done_out(rx_frame_complete),
     // Ground clutter removal
@@ -618,7 +630,11 @@ radar_receiver_final rx_inst (
     .mti_saturation_count_out(rx_mti_saturation_count),
     // Range-bin decimator watchdog (audit F-6.4)
     .range_decim_watchdog(rx_range_decim_watchdog),
-    .ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun)
+    .ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun),
+    // PR-E: scheduler outputs forwarded to TX-side CDC bridge (clk_100m).
+    .sched_wave_sel_out(sched_wave_sel),
+    .sched_chirp_pulse_out(sched_chirp_pulse),
+    .sched_frame_pulse_out(sched_frame_pulse)
 );
 
 // ============================================================================

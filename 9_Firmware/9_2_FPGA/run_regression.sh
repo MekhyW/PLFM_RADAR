@@ -52,7 +52,7 @@ PROD_RTL=(
     radar_system_top.v
     radar_transmitter.v
     dac_interface_single.v
-    plfm_chirp_controller.v
+    plfm_chirp_controller_v2.v
     radar_receiver_final.v
     tb/ad9484_interface_400m_stub.v
     ddc_400m.v
@@ -112,7 +112,7 @@ RECEIVER_RTL=(
 # Full system top (receiver chain + TX + USB + detection + self-test)
 SYSTEM_RTL=(
     radar_system_top.v
-    radar_transmitter.v dac_interface_single.v plfm_chirp_controller.v
+    radar_transmitter.v dac_interface_single.v plfm_chirp_controller_v2.v
     "${RECEIVER_RTL[@]}"
     usb_data_interface.v usb_data_interface_ft2232h.v edge_detector.v
     cfar_ca.v fpga_self_test.v
@@ -517,11 +517,11 @@ run_test "CIC Decimator" \
 
 run_test "Chirp Controller (BRAM)" \
     tb/tb_chirp_reg.vvp \
-    tb/tb_chirp_controller.v plfm_chirp_controller.v
+    tb/tb_chirp_controller.v plfm_chirp_controller_v2.v
 
 run_test "Chirp Contract" \
     tb/tb_chirp_ctr_reg.vvp \
-    tb/tb_chirp_contract.v plfm_chirp_controller.v
+    tb/tb_chirp_contract.v plfm_chirp_controller_v2.v
 
 run_doppler_cosim "stationary"   ""
 run_doppler_cosim "moving"       "-DSCENARIO_MOVING"

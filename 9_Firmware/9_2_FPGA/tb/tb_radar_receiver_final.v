@@ -181,7 +181,10 @@ radar_receiver_final dut (
     // AUDIT-C3: ADC format select — offset-binary baseline
     .host_adc_format(2'b00),
     // CFAR: frame-complete output (not used in this TB)
-    .doppler_frame_done_out()
+    .doppler_frame_done_out(),
+
+    // PR-E: pin mixers_enable HIGH so the scheduler runs in this TB
+    .mixers_enable_100m(1'b1)
 );
 
 // ============================================================================

@@ -71,6 +71,13 @@ module chirp_scheduler (
     input  wire stm32_new_subframe,
     input  wire stm32_new_frame,
 
+    // Master enable (PR-E). When low, the scheduler holds in S_IDLE and
+    // emits no chirp_pulse — the FSM resumes on the next clock edge after
+    // mixers_enable returns high. Keeps the radar quiet between operator
+    // commands and prevents stale chirp_pulses from being buffered by the
+    // TX-side cdc_async_fifo before mixers come up.
+    input  wire mixers_enable,
+
     // ====== Outputs ======
     output reg  [1:0]  wave_sel,         // canonical waveform identity
     output reg         chirp_pulse,      // 1-cycle pulse: chirp begins this clk
@@ -256,6 +263,15 @@ always @(posedge clk or negedge reset_n) begin
         subframe_id       <= 2'd0;
         track_mode_active <= 1'b0;
         track_remaining   <= 6'd0;
+    end else if (!mixers_enable) begin
+        // Master disable — quiesce the FSM so chirp_pulse never asserts and
+        // the TX side stays at idle. Doesn't disturb track_mode_active so
+        // the host can still observe whether track was last requested.
+        state          <= S_IDLE;
+        timer          <= 17'd0;
+        chirp_pulse    <= 1'b0;
+        subframe_pulse <= 1'b0;
+        frame_pulse    <= 1'b0;
     end else begin
         // Pulses default low — set high for one cycle on relevant transitions.
         chirp_pulse    <= 1'b0;
