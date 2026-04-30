@@ -75,11 +75,36 @@
 `define RP_DECIMATION_FACTOR    4       // Range bin decimation (2048 -> 512)
 `define RP_NUM_RANGE_BINS       512     // FFT_SIZE / DECIMATION_FACTOR
 `define RP_RANGE_BIN_BITS       9       // ceil(log2(512))
-`define RP_DOPPLER_FFT_SIZE     16      // Per sub-frame Doppler FFT
-`define RP_CHIRPS_PER_FRAME     32      // Total chirps (16 long + 16 short)
+`define RP_DOPPLER_FFT_SIZE     16      // Per sub-frame Doppler FFT (scan mode)
+`define RP_DOPPLER_FFT_SIZE_TRACK 64    // Track-mode dwell N (xfft_64, single waveform)
+`define RP_CHIRPS_PER_FRAME     32      // (LEGACY: scan-only 2-subframe; bumped to 48 in PR-F)
 `define RP_CHIRPS_PER_SUBFRAME  16      // Chirps per Doppler sub-frame
-`define RP_NUM_DOPPLER_BINS     32      // 2 sub-frames * 16 = 32
+`define RP_NUM_DOPPLER_BINS     32      // (LEGACY: 2 sub-frames * 16 = 32; bumped to 48 in PR-F)
 `define RP_DATA_WIDTH           16      // ADC/processing data width
+
+// 3-ladder waveform identity (replaces 1-bit use_long_chirp rail in PR-C onward)
+// `define RP_WAVE_<NAME> values are 2-bit waveform selectors carried on
+// `wave_sel[1:0]` at every chirp boundary. RESERVED is a hard error.
+`define RP_WAVE_SEL_WIDTH       2
+`define RP_WAVE_SHORT           2'b00   // 1 µs    (3 km build workhorse)
+`define RP_WAVE_MEDIUM          2'b01   // 5 µs    (mid-range fill, 0.75–8 km)
+`define RP_WAVE_LONG            2'b10   // 30 µs   (legal but unused on 50T; 200T uses for 20 km)
+`define RP_WAVE_RESERVED        2'b11
+
+// Sub-frame layout. Frame = NUM_SUBFRAMES × CHIRPS_PER_SUBFRAME chirps.
+// Scan mode uses 3 sub-frames (SHORT, MEDIUM, LONG), each running its own
+// N=16 Doppler FFT. Track mode pins the frame to one waveform and runs N=64.
+`define RP_NUM_SUBFRAMES        3
+`define RP_SUBFRAME_ID_WIDTH    2       // ceil(log2(3))
+`define RP_DOPPLER_BIN_WIDTH    6       // {sub_frame[1:0], bin[3:0]}
+
+// Adaptive-escalation detection class (CFAR output — 2-class instead of 1-flag)
+// Replaces detect_flag (1 bit) when PR-F lands.
+`define RP_DETECT_CLASS_WIDTH   2
+`define RP_DETECT_NONE          2'b00   // below soft threshold
+`define RP_DETECT_CANDIDATE     2'b01   // above soft, below confirm — host re-cues
+`define RP_DETECT_CONFIRMED     2'b10   // above confirm threshold — track-eligible
+`define RP_DETECT_RSVD          2'b11
 
 // ============================================================================
 // 3 KM MODE PARAMETERS (both 50T and 200T)
@@ -147,13 +172,31 @@
 // ============================================================================
 // Reset defaults for host-configurable timing registers.
 // Match radar_mode_controller.v parameters and main.cpp STM32 defaults.
+//
+// 3-LADDER (3 km build): SHORT 1 µs, MEDIUM 5 µs, LONG 30 µs. Same listen
+// budget across waveforms (~175 µs PRI) keeps Doppler resolution uniform.
+// LONG kept on 50T as legal-but-unused so 200T spin-up doesn't need a
+// second wave through the codebase.
 
 `define RP_DEF_LONG_CHIRP_CYCLES    3000    // 30 us
 `define RP_DEF_LONG_LISTEN_CYCLES   13700   // 137 us
 `define RP_DEF_GUARD_CYCLES         17540   // 175.4 us
-`define RP_DEF_SHORT_CHIRP_CYCLES   50      // 0.5 us
+`define RP_DEF_SHORT_CHIRP_CYCLES   50      // 0.5 us — LEGACY; PR-E switches to 100 (1 µs)
 `define RP_DEF_SHORT_LISTEN_CYCLES  17450   // 174.5 us
-`define RP_DEF_CHIRPS_PER_ELEV      32
+`define RP_DEF_CHIRPS_PER_ELEV      32      // LEGACY; bumped to 48 in PR-F
+
+// 3-ladder defaults — added in PR-A, consumed by chirp_scheduler in PR-D.
+`define RP_DEF_SHORT_CHIRP_CYCLES_V2   100     // 1 µs at 100 MHz (was 0.5 µs)
+`define RP_DEF_SHORT_LISTEN_CYCLES_V2  17400   // PRI 175 µs - chirp - guard slack
+`define RP_DEF_MEDIUM_CHIRP_CYCLES     500     // 5 µs at 100 MHz
+`define RP_DEF_MEDIUM_LISTEN_CYCLES    17000   // PRI 175 µs - chirp - guard slack
+// LONG defaults reuse RP_DEF_LONG_CHIRP_CYCLES / RP_DEF_LONG_LISTEN_CYCLES
+`define RP_DEF_CHIRPS_PER_SUBFRAME     16      // 16 per sub-frame, 3 sub-frames = 48 frame
+`define RP_DEF_SUBFRAME_ENABLE         3'b111  // SHORT|MEDIUM|LONG all on by default
+`define RP_DEF_TRACK_WATCHDOG_FRAMES   8'd5    // frames without track cmd before scan-fallback
+`define RP_DEF_TRACK_CHIRP_COUNT       9'd64   // default track-mode dwell N
+`define RP_DEF_CFAR_ALPHA_SOFT         8'h18   // 1.5 in Q4.4 — soft threshold for candidates
+                                                // (Pfa_soft ≈ 10⁻⁵; confirm Pfa ≈ 10⁻⁶ at α=3.0)
 
 // ============================================================================
 // BLIND ZONE CONSTANTS (informational, for comments and GUI)
@@ -211,6 +254,14 @@
 `define RP_RANGE_MODE_LONG          2'b01
 `define RP_RANGE_MODE_RSVD2         2'b10
 `define RP_RANGE_MODE_RSVD3         2'b11
+
+// ============================================================================
+// RADAR MODE ENCODING — TRACK extension (host_radar_mode, opcode 0x01)
+// ============================================================================
+// Mode 11 ("RESERVED" until PR-D) becomes TRACK mode: scheduler dwells one
+// beam, one waveform, host_track_chirp_count chirps. Doppler runs xfft_64.
+// RP_MODE_RESERVED below is renamed in-place for clarity.
+`define RP_MODE_TRACK               2'b11
 
 // ============================================================================
 // STREAM CONTROL (host_stream_control, opcode 0x04, 6-bit)
