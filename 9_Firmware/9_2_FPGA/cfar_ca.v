@@ -27,9 +27,11 @@
  *
  * CFAR Modes (cfg_cfar_mode):
  *   2'b00 = CA-CFAR:  noise = leading_sum + lagging_sum
- *   2'b01 = GO-CFAR:  noise = max(leading_sum * lag_cnt, lagging_sum * lead_cnt)
- *                      normalized — picks larger average
- *   2'b10 = SO-CFAR:  noise = min(leading_sum * lag_cnt, lagging_sum * lead_cnt)
+ *   2'b01 = GO-CFAR:  pick side with greater PER-CELL AVERAGE (compare via
+ *                      cross-multiply: leading_sum*lag_cnt vs lagging_sum*lead_cnt),
+ *                      then return that side's RAW SUM (NOT divided by its
+ *                      count — see GO/SO edge caveat in "Edge handling" below)
+ *   2'b10 = SO-CFAR:  pick side with smaller per-cell average, return its raw sum
  *   2'b11 = Reserved (falls back to CA-CFAR)
  *
  * Threshold computation:
@@ -45,6 +47,25 @@
  *   training cells are used. The noise estimate naturally reduces, raising
  *   false alarm rate at edges — acceptable for radar (edge bins are
  *   typically clutter).
+ *
+ *   GO/SO edge caveat (AUDIT-C7): the cross-multiply correctly picks the
+ *   side with the greater (GO) or lesser (SO) per-cell average, but the
+ *   returned noise_sum is the raw SUM from the selected side, not the
+ *   average. Combined with `alpha` being pre-baked for the interior
+ *   training-cell count, this means at edges where the picked side has
+ *   fewer than `train` cells the effective Pfa shifts by the same factor
+ *   as the cell count (up to ~2x at the first/last `r_train` bins). For
+ *   the typical config (r_train=8, r_guard=2) the asymmetry only affects
+ *   the first/last ~10 of 512 range bins — for production 3 km mode that
+ *   is 0..60 m (platform clutter) and 3012..3072 m (noise floor) where
+ *   edge errors are masked by other effects.
+ *
+ *   The fix — divide by selected_count — is explicitly NOT applied:
+ *   per-CUT integer divide is expensive in fabric and the affected
+ *   bins are clutter/noise. Operators tuning Pfa at edges should either
+ *   (a) accept the asymmetry, (b) host-side skip GO/SO outside
+ *   r_train..NRANGE-r_train and fall back to CA there, or (c) hand-tune
+ *   alpha per-mode based on observed Pfa drift.
  *
  * Timing:
  *   Phase 2 takes ~(514 + T + 3*512) * 32 ≈ 55000 cycles per frame @ 100 MHz
@@ -263,6 +284,11 @@ always @(*) begin
         noise_sum_comb = leading_sum + lagging_sum;
     end
     2'b01: begin  // GO-CFAR: pick sum from side with greater average
+        // AUDIT-C7: cross-multiply chooses by per-cell AVERAGE, but we return
+        // the raw SUM (not divided by selected count). At range edges where
+        // the picked side is truncated, effective Pfa shifts by the count
+        // ratio. Trade-off accepted; per-CUT divide is too expensive in
+        // 50T fabric. See module header "Edge handling / GO/SO edge caveat".
         if (leading_count > 0 && lagging_count > 0) begin
             // leading_avg > lagging_avg ↔ leading_sum * lagging_count > lagging_sum * leading_count
             if (leading_sum * lagging_count > lagging_sum * leading_count)
@@ -275,6 +301,7 @@ always @(*) begin
             noise_sum_comb = lagging_sum;
     end
     2'b10: begin  // SO-CFAR: pick sum from side with smaller average
+        // AUDIT-C7: same selection-vs-normalization asymmetry as GO above.
         if (leading_count > 0 && lagging_count > 0) begin
             if (leading_sum * lagging_count < lagging_sum * leading_count)
                 noise_sum_comb = leading_sum;
