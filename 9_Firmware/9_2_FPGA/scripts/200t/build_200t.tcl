@@ -68,7 +68,7 @@ set rtl_files [list \
     "${rtl_dir}/matched_filter_processing_chain.v" \
     "${rtl_dir}/nco_400m_enhanced.v" \
     "${rtl_dir}/plfm_chirp_controller.v" \
-    "${rtl_dir}/radar_mode_controller.v" \
+    "${rtl_dir}/chirp_scheduler.v" \
     "${rtl_dir}/radar_receiver_final.v" \
     "${rtl_dir}/radar_system_top.v" \
     "${rtl_dir}/radar_transmitter.v" \

@@ -34,7 +34,7 @@ reg signed [DATA_W-1:0] range_q_in;
 reg                      range_valid_in;
 reg [5:0]                range_bin_in;
 reg                      mti_enable;
-reg                      tb_use_long_chirp;
+reg [1:0]                tb_wave_sel;
 
 wire signed [DATA_W-1:0] range_i_out;
 wire signed [DATA_W-1:0] range_q_out;
@@ -65,7 +65,7 @@ mti_canceller #(
     .range_valid_out(range_valid_out),
     .range_bin_out(range_bin_out),
     .mti_enable(mti_enable),
-    .use_long_chirp(tb_use_long_chirp),  // driven by TB; T12 exercises boundary
+    .wave_sel(tb_wave_sel),              // driven by TB; T12 exercises boundary
     .mti_first_chirp(mti_first_chirp)
 );
 
@@ -94,7 +94,7 @@ task do_reset;
         range_q_in = 0;
         range_valid_in = 0;
         range_bin_in = 0;
-        tb_use_long_chirp = 1'b0;  // default homogeneous waveform
+        tb_wave_sel = 2'b00;       // default homogeneous waveform (SHORT)
         repeat (5) @(posedge clk);
         reset_n = 1;
         repeat (2) @(posedge clk);
@@ -485,7 +485,7 @@ initial begin
     mti_enable = 1'b1;
 
     // Chirp A (long, val=1000) — first chirp, muted by first-chirp path.
-    tb_use_long_chirp = 1'b1;
+    tb_wave_sel = 2'b10;  // RP_WAVE_LONG
     fork
         feed_chirp_const(16'sd1000, 16'sd500);
         capture_chirp;
@@ -496,7 +496,7 @@ initial begin
           cap_q[0] == 16'sd0);
 
     // Chirp B (long, val=2000) — same waveform: 2000 - 1000 = 1000.
-    tb_use_long_chirp = 1'b1;
+    tb_wave_sel = 2'b10;  // RP_WAVE_LONG
     cap_count = 0;
     fork
         feed_chirp_const(16'sd2000, 16'sd1500);
@@ -511,7 +511,7 @@ initial begin
     // prev buffer must be overwritten with THIS chirp (not subtracted
     // against the long-waveform chirp B). If R-1 regresses, we'd see
     // 5000 - 2000 = 3000 here instead of 0.
-    tb_use_long_chirp = 1'b0;
+    tb_wave_sel = 2'b00;  // RP_WAVE_SHORT
     cap_count = 0;
     fork
         feed_chirp_const(16'sd5000, 16'sd3000);
@@ -525,7 +525,7 @@ initial begin
     // Chirp D (short, val=5500) — same waveform as C: 5500 - 5000 = 500.
     // This proves the prev buffer was correctly overwritten with C,
     // not stuck on B's long-waveform profile.
-    tb_use_long_chirp = 1'b0;
+    tb_wave_sel = 2'b00;  // RP_WAVE_SHORT
     cap_count = 0;
     fork
         feed_chirp_const(16'sd5500, 16'sd3250);
@@ -538,7 +538,7 @@ initial begin
 
     // Chirp E (short -> long) — another boundary, reverse direction,
     // confirms muting is symmetric.
-    tb_use_long_chirp = 1'b1;
+    tb_wave_sel = 2'b10;  // RP_WAVE_LONG
     cap_count = 0;
     fork
         feed_chirp_const(16'sd9000, 16'sd4000);
@@ -566,7 +566,7 @@ initial begin
     // ================================================================
     do_reset;
     mti_enable = 1'b1;
-    tb_use_long_chirp = 1'b1;
+    tb_wave_sel = 2'b10;  // RP_WAVE_LONG
 
     // Chirp 1: early-terminate at bin 31 (only 32/64 bins). I=1000, Q=500.
     begin : t13_partial_chirp

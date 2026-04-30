@@ -74,13 +74,13 @@ module mti_canceller #(
     // ========== CONFIGURATION ==========
     input wire mti_enable,   // 1=MTI active, 0=pass-through
 
-    // Current chirp's waveform selector (from radar_mode_controller). Used
-    // to mute MTI output across the long↔short chirp boundary in range
-    // mode 01 (long-range interleave) — without this, the first chirp of
-    // a new waveform subtracts the previous waveform's range profile,
-    // injecting a per-range-bin impulse into slow-time sample 0 of the
-    // new Doppler sub-frame that spreads across all Doppler bins.
-    input wire use_long_chirp,
+    // Current chirp's waveform selector (from chirp_scheduler). Used to
+    // mute MTI output across waveform transitions in scan-mode 3-sub-frame
+    // sequencing — without this, the first chirp of a new waveform would
+    // subtract the previous waveform's range profile, injecting a per-bin
+    // impulse into slow-time sample 0 of the new Doppler sub-frame that
+    // spreads across all Doppler bins.
+    input wire [1:0] wave_sel,
 
     // ========== STATUS ==========
     output reg mti_first_chirp, // 1 during first chirp (output muted)
@@ -109,23 +109,23 @@ reg signed [DATA_WIDTH-1:0] range_i_d1, range_q_d1;
 reg                         range_valid_d1;
 reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_d1;
 reg                         mti_enable_d1;
-reg                         use_long_chirp_d1;
+reg [1:0]                   wave_sel_d1;
 
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
-        range_i_d1        <= {DATA_WIDTH{1'b0}};
-        range_q_d1        <= {DATA_WIDTH{1'b0}};
-        range_valid_d1    <= 1'b0;
-        range_bin_d1      <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
-        mti_enable_d1     <= 1'b0;
-        use_long_chirp_d1 <= 1'b0;
+        range_i_d1     <= {DATA_WIDTH{1'b0}};
+        range_q_d1     <= {DATA_WIDTH{1'b0}};
+        range_valid_d1 <= 1'b0;
+        range_bin_d1   <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
+        mti_enable_d1  <= 1'b0;
+        wave_sel_d1    <= `RP_WAVE_SHORT;
     end else begin
-        range_i_d1        <= range_i_in;
-        range_q_d1        <= range_q_in;
-        range_valid_d1    <= range_valid_in;
-        range_bin_d1      <= range_bin_in;
-        mti_enable_d1     <= mti_enable;
-        use_long_chirp_d1 <= use_long_chirp;
+        range_i_d1     <= range_i_in;
+        range_q_d1     <= range_q_in;
+        range_valid_d1 <= range_valid_in;
+        range_bin_d1   <= range_bin_in;
+        mti_enable_d1  <= mti_enable;
+        wave_sel_d1    <= wave_sel;
     end
 end
 
@@ -160,14 +160,14 @@ end
 reg has_previous;
 
 // Waveform of the chirp whose profile currently lives in prev_i/prev_q.
-// Latched on every range_valid_d1 (use_long_chirp_d1 is constant within a
-// chirp, so this stays consistent inside a chirp; at the first sample of
-// the *next* chirp the OLD value is still present for the combinational
+// Latched on every range_valid_d1 (wave_sel_d1 is constant within a chirp,
+// so this stays consistent inside a chirp; at the first sample of the
+// *next* chirp the OLD value is still present for the combinational
 // `waveform_changed` compare, then updates this cycle to the new value).
 // Updating per-cycle (rather than only at the last bin) keeps the tag
 // correct when range_bin_decimator early-terminates a chirp before
 // `range_bin_d1` ever reaches NUM_RANGE_BINS - 1 (RX-F).
-reg prev_chirp_was_long;
+reg [1:0] prev_chirp_wave_sel;
 
 // ============================================================================
 // CHIRP BOUNDARY DETECTION (RX-F: end-of-chirp without depending on the
@@ -192,7 +192,7 @@ wire chirp_boundary = range_valid_d1
 wire effective_has_previous = has_previous || chirp_boundary;
 
 wire waveform_changed = effective_has_previous
-                      && (use_long_chirp_d1 != prev_chirp_was_long);
+                      && (wave_sel_d1 != prev_chirp_wave_sel);
 
 // ============================================================================
 // MTI PROCESSING (operates on d1 pipeline stage + BRAM read data)
@@ -237,7 +237,7 @@ always @(posedge clk or negedge reset_n) begin
         range_bin_out            <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
         has_previous             <= 1'b0;
         mti_first_chirp          <= 1'b1;
-        prev_chirp_was_long      <= 1'b0;
+        prev_chirp_wave_sel      <= `RP_WAVE_SHORT;
         mti_saturation_count     <= 8'd0;
         saw_nonzero_bin_in_chirp <= 1'b0;
     end else begin
@@ -261,7 +261,7 @@ always @(posedge clk or negedge reset_n) begin
             // still visible to the combinational `waveform_changed` compare
             // (read-before-write semantics), then updates this cycle to the
             // new chirp's value.
-            prev_chirp_was_long <= use_long_chirp_d1;
+            prev_chirp_wave_sel <= wave_sel_d1;
 
             // Arm has_previous on either the original last-bin trigger OR a
             // chirp_boundary (RX-F). After this cycle, prev_i/prev_q holds
@@ -290,11 +290,12 @@ always @(posedge clk or negedge reset_n) begin
                 saw_nonzero_bin_in_chirp <= 1'b0;
             end else if (!effective_has_previous || waveform_changed) begin
                 // No valid previous chirp to subtract from — either the very
-                // first chirp after reset/enable, or the long↔short boundary
-                // in range_mode=01 where the prev buffer holds a different
-                // waveform's profile. Mute output (emit zeros with valid=1
-                // so Doppler still sees the expected chirp count), overwrite
-                // prev_i/prev_q as this chirp streams through the write port.
+                // first chirp after reset/enable, or a sub-frame waveform
+                // transition (SHORT->MEDIUM, MEDIUM->LONG, etc.) where the
+                // prev buffer holds a different waveform's profile. Mute
+                // output (emit zeros with valid=1 so Doppler still sees the
+                // expected chirp count), overwrite prev_i/prev_q as this
+                // chirp streams through the write port.
                 range_i_out     <= {DATA_WIDTH{1'b0}};
                 range_q_out     <= {DATA_WIDTH{1'b0}};
                 range_valid_out <= 1'b1;

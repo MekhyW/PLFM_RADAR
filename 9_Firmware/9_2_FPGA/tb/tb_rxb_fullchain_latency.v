@@ -34,15 +34,13 @@ module tb_rxb_fullchain_latency;
     reg                 clk;
     reg                 reset_n;
 
-    // multi_segment inputs
+    // multi_segment inputs (chirp-v2 PR-D wave_sel + chirp_pulse contract)
     reg  signed [17:0]  ddc_i;
     reg  signed [17:0]  ddc_q;
     reg                 ddc_valid;
-    reg                 use_long_chirp;
+    reg  [1:0]          wave_sel_r;        // SHORT/MEDIUM/LONG selector
     reg  [5:0]          chirp_counter;
-    reg                 mc_new_chirp;
-    reg                 mc_new_elevation;
-    reg                 mc_new_azimuth;
+    reg                 chirp_pulse;       // 1-cycle pulse on chirp start
 
     // multi_segment <-> chirp_reference_rom interconnect
     wire [1:0]          segment_request;
@@ -60,8 +58,9 @@ module tb_rxb_fullchain_latency;
     wire                pc_valid;
     wire [3:0]          ms_status;
 
-    // wave_sel shim — matches radar_receiver_final.v PR-C transitional wiring.
-    wire [1:0]          wave_sel = use_long_chirp ? `RP_WAVE_LONG : `RP_WAVE_SHORT;
+    // wave_sel drives both the ROM and the matched filter (chirp-v2 PR-D
+    // contract — no use_long_chirp shim).
+    wire [1:0]          wave_sel = wave_sel_r;
 
     // ----- Chirp reference ROM (chirp-v2 PR-C) -----
     chirp_reference_rom chirp_rom (
@@ -97,11 +96,9 @@ module tb_rxb_fullchain_latency;
         .ddc_i            (ddc_i),
         .ddc_q            (ddc_q),
         .ddc_valid        (ddc_valid),
-        .use_long_chirp   (use_long_chirp),
+        .wave_sel         (wave_sel),
         .chirp_counter    (chirp_counter),
-        .mc_new_chirp     (mc_new_chirp),
-        .mc_new_elevation (mc_new_elevation),
-        .mc_new_azimuth   (mc_new_azimuth),
+        .chirp_pulse      (chirp_pulse),
         .ref_chirp_real   (ref_i_d),
         .ref_chirp_imag   (ref_q_d),
         .segment_request  (segment_request),
@@ -225,11 +222,9 @@ module tb_rxb_fullchain_latency;
         ddc_i            = 0;
         ddc_q            = 0;
         ddc_valid        = 0;
-        use_long_chirp   = 1'b0;   // use SHORT chirp path so loader uses short_chirp_*.mem
+        wave_sel_r       = `RP_WAVE_SHORT;   // SHORT path → rx_short_*.mem
         chirp_counter    = 6'd0;
-        mc_new_chirp     = 1'b0;
-        mc_new_elevation = 1'b0;
-        mc_new_azimuth   = 1'b0;
+        chirp_pulse      = 1'b0;
 
         // Load the same short-chirp samples the ROM will serve as ref,
         // so signal == ref → autocorrelation. Peak should be at bin 0 if
@@ -248,12 +243,12 @@ module tb_rxb_fullchain_latency;
         $display("FFT_SIZE: %0d, SHORT_LEN: %0d", FFT_SIZE, SHORT_LEN);
         $display("");
 
-        // Pulse mc_new_chirp
-        $display("[T=%0t] Pulsing mc_new_chirp HIGH...", $time);
+        // Pulse chirp_pulse for one cycle (chirp-v2 PR-D contract)
+        $display("[T=%0t] Pulsing chirp_pulse HIGH...", $time);
         @(posedge clk);
-        #1 mc_new_chirp = 1'b1;
-        repeat (4) @(posedge clk);
-        #1 mc_new_chirp = 1'b0;
+        #1 chirp_pulse = 1'b1;
+        @(posedge clk);
+        #1 chirp_pulse = 1'b0;
 
         // Feed signal samples (same as ref → autocorrelation)
         feed_short_chirp_signal;

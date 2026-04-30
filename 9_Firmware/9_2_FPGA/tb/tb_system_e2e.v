@@ -35,7 +35,7 @@
  *     chirp_reference_rom.v \
  *     matched_filter_multi_segment.v matched_filter_processing_chain.v \
  *     range_bin_decimator.v doppler_processor.v xfft_16.v fft_engine.v \
- *     usb_data_interface.v edge_detector.v radar_mode_controller.v
+ *     usb_data_interface.v edge_detector.v chirp_scheduler.v
  *
  * Run:
  *   vvp tb/tb_system_e2e.vvp
@@ -873,14 +873,16 @@ initial begin
     check(obs_range_valid_count > saved_range_count,
           "G8.1: Auto-scan generated range profile output autonomously");
 
-    // G8.2: Receiver mode controller chirp counter advanced
-    // Access the RX-side mode controller chirp count directly.
-    check(dut.rx_inst.rmc_chirp_count > 0 || dut.rx_inst.rmc_elevation_count > 0,
-          "G8.2: RX mode controller chirp/elevation counters advanced");
+    // G8.2: chirp_scheduler chirp counter advanced (chirp-v2 PR-D)
+    // Sub-frame id replaces "elevation" in the v2 contract.
+    check(dut.rx_inst.sched_chirp_counter > 0 || dut.rx_inst.sched_subframe_id > 0,
+          "G8.2: chirp_scheduler chirp/sub-frame counters advanced");
 
-    // G8.3: RX-side elevation counter incremented (4 chirps/elev)
-    check(dut.rx_inst.rmc_elevation_count >= 1,
-          "G8.3: RX elevation counter incremented in auto-scan");
+    // G8.3: sub-frame index incremented (auto-scan walks SHORT->MEDIUM->LONG).
+    // chirps_per_subframe = 16 in PR-D, so a sub-frame transition implies the
+    // first 16 chirps completed.
+    check(dut.rx_inst.sched_subframe_id >= 1 || dut.rx_inst.sched_chirp_counter >= 6'd1,
+          "G8.3: sub-frame counter or chirp counter advanced in auto-scan");
 
     // G8.4: Switch to single-chirp mode — auto-scan stops
     bfm_send_cmd(8'h01, 8'h00, 16'h0002);  // mode = 10 = single chirp

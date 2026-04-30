@@ -251,9 +251,9 @@ reg [5:0]  host_stream_control;
 reg [3:0]  host_gain_shift;
 
 // Gap 2: Host-configurable chirp timing registers
-// These override the compile-time defaults in radar_mode_controller when
-// written via USB command. Defaults match the parameter values in
-// radar_mode_controller.v so behavior is unchanged until the host writes them.
+// chirp_scheduler (chirp-v2 PR-D) consumes these directly — no parameter
+// overrides. Defaults match the legacy values so behavior is unchanged
+// until the host writes them. PR-G adds the v2 medium/track/subframe regs.
 reg [15:0] host_long_chirp_cycles;    // Opcode 0x10 (default 3000)
 reg [15:0] host_long_listen_cycles;   // Opcode 0x11 (default 13700)
 reg [15:0] host_guard_cycles;         // Opcode 0x12 (default 17540)
@@ -589,9 +589,8 @@ radar_receiver_final rx_inst (
     .host_agc_attack(host_agc_attack),
     .host_agc_decay(host_agc_decay),
     .host_agc_holdoff(host_agc_holdoff),
-    // STM32 toggle signals for RX mode controller (mode 00 pass-through).
-    // These are the raw GPIO inputs — the RX mode controller's edge detectors
-    // (inside radar_mode_controller) handle debouncing/edge detection.
+    // STM32 toggle signals for the RX scheduler (mode 00 pass-through).
+    // Raw GPIO inputs — chirp_scheduler's edge detectors handle debouncing.
     .stm32_new_chirp_rx(stm32_new_chirp),
     .stm32_new_elevation_rx(stm32_new_elevation),
     .stm32_new_azimuth_rx(stm32_new_azimuth),
@@ -1003,12 +1002,13 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
         host_detect_threshold <= 16'd10000; // Default threshold
         host_stream_control <= `RP_STREAM_CTRL_DEFAULT; // Default: all streams, mag-only mode
         host_gain_shift     <= 4'd0;      // Default: pass-through (no gain change)
-        // Gap 2: chirp timing defaults (match radar_mode_controller parameters)
+        // Gap 2: chirp timing defaults (forwarded to chirp_scheduler).
+        // SHORT bumped to 100 cycles (1 us) for chirp-v2 SHORT waveform.
         host_long_chirp_cycles  <= 16'd3000;
         host_long_listen_cycles <= 16'd13700;
         host_guard_cycles       <= 16'd17540;
-        host_short_chirp_cycles <= 16'd50;
-        host_short_listen_cycles <= 16'd17450;
+        host_short_chirp_cycles <= 16'd100;
+        host_short_listen_cycles <= 16'd17400;
         host_chirps_per_elev    <= 6'd32;
         host_status_request     <= 1'b0;
         chirps_mismatch_error   <= 1'b0;

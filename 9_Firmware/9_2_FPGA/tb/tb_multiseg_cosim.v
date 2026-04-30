@@ -32,7 +32,7 @@ localparam FFT_SIZE = 1024;
 localparam SEGMENT_ADVANCE = 896;     // 1024 - 128
 localparam OVERLAP_SAMPLES = 128;
 localparam LONG_SEGMENTS = 4;
-localparam SHORT_SAMPLES = 50;
+localparam SHORT_SAMPLES = 100;       // chirp-v2 SHORT = 1 us (was 0.5 us / 50 samples)
 localparam LONG_CHIRP_SAMPLES = 3000;
 localparam TIMEOUT = 500000;          // Max clocks per operation
 
@@ -51,14 +51,16 @@ always #(CLK_PERIOD / 2) clk = ~clk;
 reg signed [17:0] ddc_i;
 reg signed [17:0] ddc_q;
 reg ddc_valid;
-reg use_long_chirp;
+reg [1:0] wave_sel;
 reg [5:0] chirp_counter;
-reg mc_new_chirp;
-reg mc_new_elevation;
-reg mc_new_azimuth;
+reg chirp_pulse;
 reg [15:0] ref_chirp_real;
 reg [15:0] ref_chirp_imag;
 reg mem_ready;
+
+// chirp-v2 PR-D: legacy use_long_chirp removed. Tests pick a waveform via
+// wave_sel directly; helper alias kept for legibility in test bodies.
+wire use_long_chirp = (wave_sel == 2'b10);  // RP_WAVE_LONG
 
 wire signed [15:0] pc_i_w;
 wire signed [15:0] pc_q_w;
@@ -77,11 +79,9 @@ matched_filter_multi_segment dut (
     .ddc_i(ddc_i),
     .ddc_q(ddc_q),
     .ddc_valid(ddc_valid),
-    .use_long_chirp(use_long_chirp),
+    .wave_sel(wave_sel),
     .chirp_counter(chirp_counter),
-    .mc_new_chirp(mc_new_chirp),
-    .mc_new_elevation(mc_new_elevation),
-    .mc_new_azimuth(mc_new_azimuth),
+    .chirp_pulse(chirp_pulse),
     .ref_chirp_real(ref_chirp_real),
     .ref_chirp_imag(ref_chirp_imag),
     .segment_request(segment_request),
@@ -176,11 +176,9 @@ task apply_reset;
         ddc_i <= 18'd0;
         ddc_q <= 18'd0;
         ddc_valid <= 1'b0;
-        use_long_chirp <= 1'b0;
+        wave_sel <= 2'b00;        // RP_WAVE_SHORT
         chirp_counter <= 6'd0;
-        mc_new_chirp <= 1'b0;
-        mc_new_elevation <= 1'b0;
-        mc_new_azimuth <= 1'b0;
+        chirp_pulse <= 1'b0;
         ref_chirp_real <= 16'd0;
         ref_chirp_imag <= 16'd0;
         mem_ready <= 1'b0;
@@ -301,18 +299,19 @@ initial begin
     $display("\n=== TEST 2: Short Chirp (1 segment, zero-padded) ===");
 
     apply_reset;
-    use_long_chirp <= 1'b0;
+    wave_sel <= 2'b00;       // RP_WAVE_SHORT
     chirp_counter <= 6'd0;
     @(posedge clk);
 
-    // Trigger chirp start (rising edge on mc_new_chirp)
-    mc_new_chirp <= 1'b1;
+    // Trigger chirp start (1-cycle chirp_pulse from chirp_scheduler)
+    chirp_pulse <= 1'b1;
     @(posedge clk);
+    chirp_pulse <= 1'b0;
     @(posedge clk);
     // Verify FSM transitioned to ST_COLLECT_DATA
     check(fsm_state == 4'd1, "Short chirp: entered ST_COLLECT_DATA");
 
-    // Feed 50 short chirp samples
+    // Feed SHORT_SAMPLES (100) short chirp samples
     for (i = 0; i < SHORT_SAMPLES; i = i + 1) begin
         @(posedge clk);
         ddc_i <= (i * 100 + 500) & 18'h3FFFF;  // Identifiable values
@@ -365,13 +364,14 @@ initial begin
     $display("\n=== TEST 3: Long Chirp (4 segments, overlap-save) ===");
 
     apply_reset;
-    use_long_chirp <= 1'b1;
+    wave_sel <= 2'b10;       // RP_WAVE_LONG
     chirp_counter <= 6'd0;
     @(posedge clk);
 
-    // Trigger chirp start
-    mc_new_chirp <= 1'b1;
+    // Trigger chirp start (1-cycle chirp_pulse)
+    chirp_pulse <= 1'b1;
     @(posedge clk);
+    chirp_pulse <= 1'b0;
     @(posedge clk);
     check(fsm_state == 4'd1, "Long chirp: entered ST_COLLECT_DATA");
     check(tot_seg == 3'd4, "total_segments = 4");
@@ -637,11 +637,11 @@ initial begin
     // Verify we can start a new chirp after the previous one completed
     check(fsm_state == 4'd0, "In IDLE before re-trigger");
 
-    // Toggle mc_new_chirp (it was left high, so toggle low then high)
-    mc_new_chirp <= 1'b0;
+    // Re-trigger via 1-cycle chirp_pulse
     repeat(3) @(posedge clk);
-    mc_new_chirp <= 1'b1;
+    chirp_pulse <= 1'b1;
     @(posedge clk);
+    chirp_pulse <= 1'b0;
     @(posedge clk);
     @(posedge clk);
     check(fsm_state == 4'd1, "Re-trigger: entered ST_COLLECT_DATA");

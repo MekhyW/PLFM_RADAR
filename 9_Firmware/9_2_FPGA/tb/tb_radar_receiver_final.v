@@ -41,7 +41,7 @@
 //
 // Strategy:
 //   - Uses behavioral stub for ad9484_interface_400m (no Xilinx primitives)
-//   - Overrides radar_mode_controller timing params for fast simulation
+//   - Drives chirp_scheduler timing via host_* inputs for fast simulation
 //   - Feeds 120 MHz tone at ADC input (IF frequency -> DDC passband)
 //   - Verifies structural correctness + golden comparison + bounds checks
 //
@@ -103,6 +103,9 @@ reg mc_new_chirp_prev;
 reg tx_frame_start;
 reg [5:0] rmc_chirp_prev;
 
+// chirp-v2 PR-D: chirp_scheduler emits chirp_pulse (1-cycle pulse) and
+// sched_chirp_counter directly. mc_new_chirp toggle / rmc_chirp_count are
+// gone. The probe just rides those pulses to drive the TB-side counters.
 always @(posedge clk_100m or negedge reset_n) begin
     if (!reset_n) begin
         chirp_counter <= 6'd0;
@@ -110,17 +113,16 @@ always @(posedge clk_100m or negedge reset_n) begin
         tx_frame_start <= 1'b0;
         rmc_chirp_prev <= 6'd0;
     end else begin
-        mc_new_chirp_prev <= dut.mc_new_chirp;
-        if (dut.mc_new_chirp != mc_new_chirp_prev) begin
+        if (dut.chirp_pulse) begin
             chirp_counter <= chirp_counter + 1;
         end
-        
-        // Detect when the internal mode controller's chirp_count wraps to 0
+
+        // Detect when the scheduler's chirp_counter wraps to 0
         tx_frame_start <= 1'b0;
-        if (dut.rmc_chirp_count == 6'd0 && rmc_chirp_prev != 6'd0) begin
+        if (dut.sched_chirp_counter == 6'd0 && rmc_chirp_prev != 6'd0) begin
             tx_frame_start <= 1'b1;
         end
-        rmc_chirp_prev <= dut.rmc_chirp_count;
+        rmc_chirp_prev <= dut.sched_chirp_counter;
     end
 end
 
@@ -163,13 +165,16 @@ radar_receiver_final dut (
     .host_range_mode(2'b01),     // long-range mode (dual chirp); was missing -> z
     .host_trigger(1'b0),
 
-    // Gap 2: Host-configurable chirp timing — match defparam overrides below
+    // chirp-v2 PR-D: chirp_scheduler is host-input driven. SHORT chirp bumped
+    // to 100 cycles (1 µs V2). Host_chirps_per_elev is still wired to keep
+    // the parent port list intact, but the scheduler inside the receiver
+    // pins chirps_per_subframe to RP_DEF (16) — PR-G renames the host reg.
     .host_long_chirp_cycles(16'd500),
     .host_long_listen_cycles(16'd2000),
     .host_guard_cycles(16'd500),
-    .host_short_chirp_cycles(16'd50),
+    .host_short_chirp_cycles(16'd100),
     .host_short_listen_cycles(16'd1000),
-    .host_chirps_per_elev(6'd32),
+    .host_chirps_per_elev(6'd16),
 
     // Fix 3: digital gain control — pass-through for golden reference
     .host_gain_shift(4'd0),
@@ -180,19 +185,13 @@ radar_receiver_final dut (
 );
 
 // ============================================================================
-// OVERRIDE TIMING PARAMETERS via defparam
-// ============================================================================
-// Reduce radar_mode_controller timing to keep simulation tractable.
+// SIM TIMING — driven via host_* inputs above (chirp-v2 PR-D).
+// chirp_scheduler is host-input driven; no defparam overrides needed.
 // Real values: LONG_CHIRP=3000, LONG_LISTEN=13700, GUARD=17540,
-//              SHORT_CHIRP=50, SHORT_LISTEN=17450  (total ~51740 per chirp)
-// Need enough DDC samples to fill MF buffer (896) plus latency buffer (3187).
-// At ~1 DDC sample per sys_clk, we need at least ~5000 sys_clk per chirp.
-// Use moderately reduced values: ~5000 cycles per chirp pair
-defparam dut.rmc.LONG_CHIRP_CYCLES   = 500;
-defparam dut.rmc.LONG_LISTEN_CYCLES  = 2000;
-defparam dut.rmc.GUARD_CYCLES        = 500;
-defparam dut.rmc.SHORT_CHIRP_CYCLES  = 50;
-defparam dut.rmc.SHORT_LISTEN_CYCLES = 1000;
+//              SHORT_CHIRP=100 (V2), SHORT_LISTEN=17400  (~31040 per chirp).
+// The host_* assignments above feed the same compressed timing the legacy
+// defparams used.
+// ============================================================================
 
 // ============================================================================
 // TEST INFRASTRUCTURE

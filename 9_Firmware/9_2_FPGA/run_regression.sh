@@ -75,7 +75,7 @@ PROD_RTL=(
     usb_data_interface.v
     usb_data_interface_ft2232h.v
     edge_detector.v
-    radar_mode_controller.v
+    chirp_scheduler.v
     rx_gain_control.v
     cfar_ca.v
     mti_canceller.v
@@ -97,7 +97,7 @@ EXTRA_RTL=(
 # Receiver chain (used by golden generate/compare tests)
 RECEIVER_RTL=(
     radar_receiver_final.v
-    radar_mode_controller.v
+    chirp_scheduler.v
     tb/ad9484_interface_400m_stub.v
     ddc_400m.v nco_400m_enhanced.v cic_decimator_4x_enhanced.v
     cdc_modules.v cdc_async_fifo.v fir_lowpass.v ddc_input_interface.v
@@ -721,10 +721,6 @@ run_test "USB Data Interface" \
 run_test "Range Bin Decimator" \
     tb/tb_rbd_reg.vvp \
     tb/tb_range_bin_decimator.v range_bin_decimator.v
-
-run_test "Radar Mode Controller" \
-    tb/tb_rmc_reg.vvp \
-    tb/tb_radar_mode_controller.v radar_mode_controller.v
 
 echo ""
 

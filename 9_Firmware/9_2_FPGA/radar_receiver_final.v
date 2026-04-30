@@ -122,16 +122,18 @@ module radar_receiver_final (
 );
 
 // ========== INTERNAL SIGNALS ==========
-wire use_long_chirp;
-// NOTE: chirp_counter is now an input port (was undriven internal wire — bug NEW-1)
-wire chirp_start;
-wire azimuth_change;
-wire elevation_change;
-
-// Mode controller outputs → matched_filter_multi_segment
-wire mc_new_chirp;
-wire mc_new_elevation;
-wire mc_new_azimuth;
+// chirp_counter is an input port (driven by the transmitter — bug NEW-1).
+// chirp_scheduler emits the canonical wave_sel rail and 1-cycle chirp_pulse;
+// no use_long_chirp shim and no mc_new_*-toggle XOR converters.
+wire [1:0] wave_sel;
+wire chirp_pulse;
+wire subframe_pulse;       // unused on RX in PR-D; doppler picks up in PR-F
+wire frame_pulse;          // unused on RX in PR-D; PR-F doppler driver
+wire [5:0] sched_chirp_counter;
+wire [1:0] sched_subframe_id;
+wire [15:0] sched_cfg_chirp_cycles, sched_cfg_listen_cycles, sched_cfg_guard_cycles;
+wire sched_track_mode_active;
+wire [5:0] sched_track_beam_az, sched_track_beam_el;
 
 wire [1:0] segment_request;
 wire mem_request;
@@ -151,12 +153,6 @@ wire [3:0] gc_current_gain;      // Diagnostic: effective gain_shift
 // Reference signal for the processing chain (carries SHORT/MEDIUM/LONG ref
 // depending on wave_sel — selected by chirp_reference_rom).
 wire [15:0] ref_chirp_real, ref_chirp_imag;
-
-// chirp-v2 PR-C: wave_sel shim. radar_mode_controller still produces a
-// 1-bit use_long_chirp output (replaced in PR-D by chirp_scheduler whose
-// native output is wave_sel[1:0]). MEDIUM is unreachable through the
-// 1-bit path; the rom serves SHORT or LONG only until PR-D lands.
-wire [1:0] wave_sel = use_long_chirp ? `RP_WAVE_LONG : `RP_WAVE_SHORT;
 
 // ========== DOPPLER PROCESSING SIGNALS ==========
 wire [31:0] range_data_32bit;
@@ -206,42 +202,53 @@ wire mti_range_valid;
 wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] mti_range_bin;  // 9-bit
 wire mti_first_chirp;
 
-// ========== RADAR MODE CONTROLLER SIGNALS ==========
-wire rmc_scanning;
-wire rmc_scan_complete;
-wire [5:0] rmc_chirp_count;
-wire [5:0] rmc_elevation_count;
-wire [5:0] rmc_azimuth_count;
-
 // ========== MODULE INSTANTIATIONS ==========
 
-// 0. Radar Mode Controller — drives chirp/elevation/azimuth timing signals
-//    Default mode: auto-scan (2'b01). Change to 2'b00 for STM32 pass-through.
-radar_mode_controller rmc (
+// 0. Chirp scheduler (chirp-v2 PR-D) — single source of truth for waveform
+//    identity and inter-chirp timing on the RX side. Replaces the legacy
+//    radar_mode_controller. SHORT/MEDIUM/LONG ladders + sub-frame walking
+//    + host-cued track dwell with watchdog scan-fallback.
+//
+//    Several inputs (medium/track/subframe-enable/debug) are pinned to
+//    radar_params defaults until PR-G plumbs the new USB opcodes through
+//    radar_system_top. host_chirps_per_elev (legacy) is intentionally not
+//    wired here — the V2 sub-frame structure uses RP_DEF_CHIRPS_PER_SUBFRAME
+//    (16) and PR-G renames the host register.
+chirp_scheduler sched (
     .clk(clk),
     .reset_n(reset_n),
-    .mode(host_mode),                     // Controlled by host via USB (default: 2'b01 auto-scan)
-    .range_mode(host_range_mode),          // Range mode: 00=3km, 01=long-range (drives chirp type)
-    .stm32_new_chirp(stm32_new_chirp_rx),
-    .stm32_new_elevation(stm32_new_elevation_rx),
-    .stm32_new_azimuth(stm32_new_azimuth_rx),
-    .trigger(host_trigger),           // Single-chirp trigger from host via USB
-    // Gap 2: Runtime-configurable timing from host USB commands
-    .cfg_long_chirp_cycles(host_long_chirp_cycles),
-    .cfg_long_listen_cycles(host_long_listen_cycles),
-    .cfg_guard_cycles(host_guard_cycles),
-    .cfg_short_chirp_cycles(host_short_chirp_cycles),
-    .cfg_short_listen_cycles(host_short_listen_cycles),
-    .cfg_chirps_per_elev(host_chirps_per_elev),
-    .use_long_chirp(use_long_chirp),
-    .mc_new_chirp(mc_new_chirp),
-    .mc_new_elevation(mc_new_elevation),
-    .mc_new_azimuth(mc_new_azimuth),
-    .chirp_count(rmc_chirp_count),
-    .elevation_count(rmc_elevation_count),
-    .azimuth_count(rmc_azimuth_count),
-    .scanning(rmc_scanning),
-    .scan_complete(rmc_scan_complete)
+    .host_mode(host_mode),
+    .host_subframe_enable(`RP_DEF_SUBFRAME_ENABLE),
+    .host_short_chirp_cycles (host_short_chirp_cycles),
+    .host_short_listen_cycles(host_short_listen_cycles),
+    .host_medium_chirp_cycles (16'd`RP_DEF_MEDIUM_CHIRP_CYCLES),
+    .host_medium_listen_cycles(16'd`RP_DEF_MEDIUM_LISTEN_CYCLES),
+    .host_long_chirp_cycles (host_long_chirp_cycles),
+    .host_long_listen_cycles(host_long_listen_cycles),
+    .host_guard_cycles(host_guard_cycles),
+    .host_chirps_per_subframe(6'd`RP_DEF_CHIRPS_PER_SUBFRAME),
+    .host_trigger(host_trigger),
+    .host_debug_wave_sel(`RP_WAVE_SHORT),
+    .host_track_request(1'b0),
+    .host_track_wave_sel(`RP_WAVE_SHORT),
+    .host_track_chirp_count(`RP_DEF_TRACK_CHIRP_COUNT),
+    .host_track_beam_az(6'd0),
+    .host_track_beam_el(6'd0),
+    .stm32_new_chirp   (stm32_new_chirp_rx),
+    .stm32_new_subframe(stm32_new_elevation_rx),
+    .stm32_new_frame   (stm32_new_azimuth_rx),
+    .wave_sel(wave_sel),
+    .chirp_pulse(chirp_pulse),
+    .subframe_pulse(subframe_pulse),
+    .frame_pulse(frame_pulse),
+    .chirp_counter(sched_chirp_counter),
+    .subframe_id(sched_subframe_id),
+    .cfg_chirp_cycles (sched_cfg_chirp_cycles),
+    .cfg_listen_cycles(sched_cfg_listen_cycles),
+    .cfg_guard_cycles (sched_cfg_guard_cycles),
+    .track_mode_active(sched_track_mode_active),
+    .track_beam_az(sched_track_beam_az),
+    .track_beam_el(sched_track_beam_el)
 );
 wire clk_400m;
 
@@ -461,11 +468,9 @@ matched_filter_multi_segment mf_dual (
     .ddc_i({{2{gc_i[15]}}, gc_i}),
     .ddc_q({{2{gc_q[15]}}, gc_q}),
     .ddc_valid(gc_valid),
-    .use_long_chirp(use_long_chirp),
+    .wave_sel(wave_sel),
     .chirp_counter(chirp_counter),
-    .mc_new_chirp(mc_new_chirp),
-    .mc_new_elevation(mc_new_elevation),
-    .mc_new_azimuth(mc_new_azimuth),
+    .chirp_pulse(chirp_pulse),
 	 .ref_chirp_real(ref_chirp_real),      // 1-FF aligned ref (RX-B fix)
     .ref_chirp_imag(ref_chirp_imag),
     .segment_request(segment_request),
@@ -517,7 +522,7 @@ mti_canceller #(
     .range_valid_out(mti_range_valid),
     .range_bin_out(mti_range_bin),
     .mti_enable(host_mti_enable),
-    .use_long_chirp(use_long_chirp),
+    .wave_sel(wave_sel),
     .mti_first_chirp(mti_first_chirp),
     .mti_saturation_count(mti_saturation_count_out)
 );

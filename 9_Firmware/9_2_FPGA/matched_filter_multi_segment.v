@@ -12,16 +12,16 @@ module matched_filter_multi_segment (
     input wire signed [17:0] ddc_q,
     input wire ddc_valid,
     
-    // Chirp control (from sequence controller)
-    input wire use_long_chirp,      // 
-    input wire [5:0] chirp_counter, // 
-    
-    // Microcontroller sync signals
-    input wire mc_new_chirp,        // Toggle for new chirp (32)
-    input wire mc_new_elevation,    // Toggle for new elevation (32)
-    input wire mc_new_azimuth,      // Toggle for new azimuth (50)
-    
-    // Reference chirp (upstream memory loader selects long/short via use_long_chirp)
+    // Chirp control (from chirp_scheduler — chirp-v2 wave_sel rail)
+    input wire [1:0] wave_sel,        // 00=SHORT, 01=MEDIUM, 10=LONG
+    input wire [5:0] chirp_counter,
+
+    // Chirp boundary — 1-cycle pulse from chirp_scheduler. Replaces the old
+    // mc_new_chirp toggle + XOR edge detector; mc_new_elevation/azimuth are
+    // gone (they were dead — no consumer in this module).
+    input wire chirp_pulse,
+
+    // Reference chirp (chirp_reference_rom selects waveform via wave_sel)
     input wire [15:0] ref_chirp_real,
     input wire [15:0] ref_chirp_imag,
     
@@ -42,17 +42,21 @@ module matched_filter_multi_segment (
 
 // ========== FIXED PARAMETERS ==========
 parameter BUFFER_SIZE = `RP_FFT_SIZE;              // 2048
-parameter LONG_CHIRP_SAMPLES = 3000;               // Still 3000 samples total
-parameter SHORT_CHIRP_SAMPLES = 50;                // 0.5 us @ 100MHz
+parameter LONG_CHIRP_SAMPLES   = 3000;             // 30 us @ 100 MHz
+parameter MEDIUM_CHIRP_SAMPLES = 500;              // 5 us @ 100 MHz (chirp-v2)
+parameter SHORT_CHIRP_SAMPLES  = 100;              // 1 us @ 100 MHz (chirp-v2; was 50)
 parameter OVERLAP_SAMPLES = `RP_OVERLAP_SAMPLES;   // 128
 parameter SEGMENT_ADVANCE = `RP_SEGMENT_ADVANCE;   // 2048 - 128 = 1920 samples
 parameter DEBUG = 1;                               // Debug output control
 
-// Calculate segments needed with overlap
-// For 3000 samples with 128 overlap:
-// Segments = ceil((3000 - 2048) / 1920) + 1 = ceil(952/1920) + 1 = 2
-parameter LONG_SEGMENTS = `RP_LONG_SEGMENTS_3KM;   // 2 segments
-parameter SHORT_SEGMENTS = 1;                      // 50 samples padded to 2048
+// Segment counts (overlap-save). LONG spans 2 segments; SHORT and MEDIUM
+// both fit in a single 2048 buffer with zero-pad.
+parameter LONG_SEGMENTS  = `RP_LONG_SEGMENTS_3KM;  // 2 segments (30 us / 2048-128 overlap)
+parameter SHORT_SEGMENTS = 1;                      // SHORT or MEDIUM, single segment
+
+// Convenience nets so the FSM body reads cleanly.
+wire is_long   = (wave_sel == `RP_WAVE_LONG);
+wire is_medium = (wave_sel == `RP_WAVE_MEDIUM);
 
 // ========== FIXED INTERNAL SIGNALS ==========
 reg signed [31:0] pc_i, pc_q;
@@ -107,12 +111,6 @@ reg        ov_we;
 reg [6:0]  ov_waddr;
 reg signed [15:0] ov_wdata_i, ov_wdata_q;
 
-// Microcontroller sync detection
-reg mc_new_chirp_prev, mc_new_elevation_prev, mc_new_azimuth_prev;
-wire chirp_start_pulse = mc_new_chirp ^ mc_new_chirp_prev;           // Toggle-to-pulse (any edge)
-wire elevation_change_pulse = mc_new_elevation ^ mc_new_elevation_prev; // Toggle-to-pulse
-wire azimuth_change_pulse = mc_new_azimuth ^ mc_new_azimuth_prev;     // Toggle-to-pulse
-
 // Processing chain signals
 wire [15:0] fft_pc_i, fft_pc_q;
 wire fft_pc_valid;
@@ -125,19 +123,6 @@ reg fft_start;
 
 // ========== SAMPLE ADDRESS OUTPUT ==========
 assign sample_addr_out = buffer_read_ptr[10:0];
-
-// ========== MICROCONTROLLER SYNC ==========
-always @(posedge clk or negedge reset_n) begin
-    if (!reset_n) begin
-        mc_new_chirp_prev <= 1'b0;
-        mc_new_elevation_prev <= 1'b0;
-        mc_new_azimuth_prev <= 1'b0;
-    end else begin
-        mc_new_chirp_prev <= mc_new_chirp;
-        mc_new_elevation_prev <= mc_new_elevation;
-        mc_new_azimuth_prev <= mc_new_azimuth;
-    end
-end
 
 // ========== BUFFER INITIALIZATION ==========
 integer buf_init;
@@ -227,15 +212,15 @@ always @(posedge clk or negedge reset_n) begin
                 chirp_complete <= 0;
                 saw_chain_output <= 0;
                 
-                // Wait for chirp start from microcontroller
-                if (chirp_start_pulse) begin
+                // Wait for chirp start (1-cycle pulse from chirp_scheduler)
+                if (chirp_pulse) begin
                     state <= ST_COLLECT_DATA;
-                    total_segments <= use_long_chirp ? LONG_SEGMENTS[2:0] : SHORT_SEGMENTS[2:0];
-                    
+                    total_segments <= is_long ? LONG_SEGMENTS[2:0] : SHORT_SEGMENTS[2:0];
+
                     `ifdef SIMULATION
                     $display("[MULTI_SEG_FIXED] Starting %s chirp, segments: %d",
-                             use_long_chirp ? "LONG" : "SHORT", 
-                             use_long_chirp ? LONG_SEGMENTS : SHORT_SEGMENTS);
+                             is_long ? "LONG" : (is_medium ? "MEDIUM" : "SHORT"),
+                             is_long ? LONG_SEGMENTS : SHORT_SEGMENTS);
                     $display("[MULTI_SEG_FIXED] Overlap: %d samples, Advance: %d samples",
                              OVERLAP_SAMPLES, SEGMENT_ADVANCE);
                     `endif
@@ -269,13 +254,18 @@ always @(posedge clk or negedge reset_n) begin
                         `endif
                     end
                     
-                    // SHORT CHIRP: Only 50 samples, then zero-pad
-                    if (!use_long_chirp) begin
-                        if (chirp_samples_collected >= SHORT_CHIRP_SAMPLES - 1) begin
+                    // SHORT/MEDIUM single-segment path: collect waveform-specific
+                    // sample count then zero-pad to 2048. SHORT=100 (1 us),
+                    // MEDIUM=500 (5 us). LONG path falls through to the
+                    // multi-segment overlap-save block below.
+                    if (!is_long) begin
+                        if (( is_medium && chirp_samples_collected >= MEDIUM_CHIRP_SAMPLES - 1) ||
+                            (!is_medium && chirp_samples_collected >= SHORT_CHIRP_SAMPLES  - 1)) begin
                             state <= ST_ZERO_PAD;
                             chirp_complete <= 1;  // Bug A fix: mark chirp done so ST_OUTPUT exits to IDLE
                             `ifdef SIMULATION
-                            $display("[MULTI_SEG_FIXED] Short chirp: collected %d samples, starting zero-pad",
+                            $display("[MULTI_SEG_FIXED] %s chirp: collected %d samples, starting zero-pad",
+                                     is_medium ? "Medium" : "Short",
                                      chirp_samples_collected + 1);
                             `endif
                         end
@@ -291,19 +281,19 @@ always @(posedge clk or negedge reset_n) begin
                 // processing.  For segment 0 this means FFT_SIZE fresh samples.
                 // For segments 1+, write_ptr starts at OVERLAP_SAMPLES (128)
                 // so we collect 896 new samples to fill the buffer.
-                if (use_long_chirp) begin
+                if (is_long) begin
                     if (buffer_write_ptr >= BUFFER_SIZE) begin
                         buffer_has_data <= 1;
                         state <= ST_WAIT_REF;
                         segment_request <= current_segment[1:0];
                         mem_request <= 1;
-                        
+
                         `ifdef SIMULATION
                         $display("[MULTI_SEG_FIXED] Segment %d ready: %d samples collected",
                                  current_segment, chirp_samples_collected);
                         `endif
                     end
-                    
+
                     if (chirp_samples_collected >= LONG_CHIRP_SAMPLES && !chirp_complete) begin
                         chirp_complete <= 1;
                         `ifdef SIMULATION
@@ -335,7 +325,7 @@ always @(posedge clk or negedge reset_n) begin
                     buffer_has_data <= 1;
                     buffer_write_ptr <= 0;
                     state <= ST_WAIT_REF;
-                    segment_request <= use_long_chirp ? current_segment[1:0] : 2'd0;
+                    segment_request <= is_long ? current_segment[1:0] : 2'd0;
                     mem_request <= 1;
                     `ifdef SIMULATION
                     $display("[MULTI_SEG_FIXED] Zero-pad complete, buffer full");
@@ -463,7 +453,7 @@ always @(posedge clk or negedge reset_n) begin
                 current_segment <= current_segment + 1;
                 segment_done <= 0;
                 
-                if (use_long_chirp) begin
+                if (is_long) begin
                     // OVERLAP-SAVE: Write cached tail samples back to BRAM [0..127]
                     overlap_copy_count <= 0;
                     state <= ST_OVERLAP_COPY;
@@ -473,7 +463,7 @@ always @(posedge clk or negedge reset_n) begin
                              OVERLAP_SAMPLES);
                     `endif
                 end else begin
-                    // Short chirp: only one segment
+                    // SHORT or MEDIUM: only one segment, no overlap-save.
                     buffer_write_ptr <= 0;
                     if (!chirp_complete) begin
                         state <= ST_COLLECT_DATA;
@@ -514,8 +504,9 @@ always @(posedge clk or negedge reset_n) begin
             end
         endcase
         
-        // Update status
-        status <= {state[2:0], use_long_chirp};
+        // Update status — bit 0 echoes is_long for legacy probes; full
+        // wave_sel is consumed at the module boundary.
+        status <= {state[2:0], is_long};
     end
 end
 
