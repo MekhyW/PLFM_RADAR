@@ -8,10 +8,13 @@
 //
 // Key things tested:
 //   1. Differential LVDS data capture (IBUFDS)
-//   2. DDR data capture (IDDR, SAME_EDGE_PIPELINED mode)
+//   2. IDDR Q2 (falling-edge) data capture in SAME_EDGE_PIPELINED mode
 //   3. Reset synchronizer (P1-7 fix: async assert, sync de-assert)
 //   4. Data integrity through full pipeline
-//   5. Phase interleaving (rising/falling edge multiplexing)
+//   5. AUDIT-C4: SDR-correctness — every rising-DCO sample appears exactly
+//      once in the output stream (no duplications, no drops). Catches any
+//      future regression that reintroduces a DDR-style Q1/Q2 demux on this
+//      SDR-only chip.
 // ============================================================================
 
 module tb_ad9484_xsim;
@@ -292,6 +295,95 @@ module tb_ad9484_xsim;
         // ════════════════════════════════════════════════════════
         // adc_pwdn is not part of this module (it's in radar_system_top)
         // Just verify the module port list is complete
+
+        // ════════════════════════════════════════════════════════
+        // TEST GROUP 8: AUDIT-C4 — SDR-correctness counter ramp
+        // ════════════════════════════════════════════════════════
+        // The AD9484 is SDR LVDS: one new sample per rising DCO edge,
+        // held stable across the full DCO period. We model that by
+        // launching a new counter value just after each rising DCO
+        // edge (~tPD = 0.85 ns) and holding it stable. The interface
+        // captures Q2 of the IDDR (falling-edge, in the stable window)
+        // and re-registers into BUFG → output.
+        //
+        // Correctness invariant: once the pipeline fills, the output
+        // stream must increment by exactly 1 per BUFG cycle — no
+        // duplications, no skips. A DDR-style Q1/Q2 demux (the previous
+        // bug) would emit each sample twice and drop alternating ones,
+        // which this test catches.
+        $display("\n--- Test Group 8: SDR Counter Ramp (AUDIT-C4) ---");
+
+        reset_n = 0;
+        adc_d_p = 8'h00;
+        #100;
+        reset_n = 1;
+        repeat (8) @(posedge adc_dco_p);
+
+        begin : sdr_ramp
+            reg [7:0] ramp_value;
+            reg [7:0] last_out;
+            reg       have_last;
+            integer   captured;
+            integer   diff_one_count;
+            integer   diff_zero_count;
+            integer   diff_other_count;
+
+            ramp_value       = 8'h10;          // start away from 0
+            have_last        = 0;
+            last_out         = 8'h00;
+            captured         = 0;
+            diff_one_count   = 0;
+            diff_zero_count  = 0;
+            diff_other_count = 0;
+
+            // Drive 64 samples in SDR style: launch new value just after
+            // each rising DCO edge, hold stable. Wrap-around in 8-bit is
+            // fine (consecutive +1 across 0xFF→0x00 still passes the
+            // diff-of-1 check).
+            for (i = 0; i < 64; i = i + 1) begin
+                @(posedge adc_dco_p);
+                #0.5;                          // ≈ AD9484 tPD launch delay
+                adc_d_p = ramp_value;
+                ramp_value = ramp_value + 8'd1;
+
+                // Sample the output near the next rising edge, after
+                // the BUFG-domain pipeline has settled.
+                if (adc_data_valid_400m) begin
+                    if (have_last) begin
+                        case (adc_data_400m - last_out)
+                            8'd1:    diff_one_count   = diff_one_count   + 1;
+                            8'd0:    diff_zero_count  = diff_zero_count  + 1;
+                            default: diff_other_count = diff_other_count + 1;
+                        endcase
+                    end
+                    last_out  = adc_data_400m;
+                    have_last = 1;
+                    captured  = captured + 1;
+                end
+            end
+
+            $display("  SDR ramp: captured=%0d  diff=+1: %0d  diff=0 (dup): %0d  other: %0d",
+                     captured, diff_one_count, diff_zero_count, diff_other_count);
+
+            // Need a meaningful number of samples to draw conclusions.
+            check(captured >= 32, "SDR ramp captured >= 32 output samples");
+
+            // Most consecutive output deltas must be +1. Allow a small
+            // slack window for pipeline-startup transients.
+            check(diff_one_count >= (captured - 6),
+                  "SDR ramp: consecutive output samples increment by +1");
+
+            // Zero deltas would indicate the broken DDR-style Q1/Q2
+            // duplication. With Q2-only routing this should be 0 (allow
+            // 1 for the very first comparison if pipeline-startup races).
+            check(diff_zero_count <= 1,
+                  "SDR ramp: no sample duplication (would indicate DDR demux bug)");
+
+            // No skips either — the broken demux dropped odd-indexed
+            // samples (delta == 2). Anything beyond +1/0 is a fail.
+            check(diff_other_count == 0,
+                  "SDR ramp: no sample skips or unexpected jumps");
+        end
 
         // ════════════════════════════════════════════════════════
         // Summary

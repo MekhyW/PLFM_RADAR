@@ -4,9 +4,10 @@ module ad9484_interface_400m (
     input wire [7:0] adc_d_n,        // ADC Data N
     input wire adc_dco_p,            // Data Clock Output P (400MHz)
     input wire adc_dco_n,            // Data Clock Output N (400MHz)
-    // Audit F-0.1: AD9484 OR (overrange) LVDS pair, DDR like data.
-    // Routed on the 50T main board to bank 14 pins M6/N6. Asserts for any
-    // sample whose absolute value exceeds full-scale.
+    // Audit F-0.1: AD9484 OR (overrange) LVDS pair (SDR, like data — see
+    // AUDIT-C4 note below; an earlier comment incorrectly described this as
+    // DDR). Routed on the 50T main board to bank 14 pins M6/N6. Asserts for
+    // any sample whose absolute value exceeds full-scale.
     input wire adc_or_p,
     input wire adc_or_n,
 
@@ -59,14 +60,16 @@ IBUFDS #(
 // ============================================================================
 // Clock buffering strategy for source-synchronous ADC interface:
 //
-// BUFIO: Near-zero insertion delay, can only drive IOB primitives (IDDR).
-//        Used for IDDR clocking to match the data path delay through IBUFDS.
-//        This eliminates the hold violation caused by BUFG insertion delay.
+// BUFIO: Near-zero insertion delay, drives IOB primitives only (in this
+//        module: the IOB-packed input FF on each data bit and the OR pair).
+//        Eliminates the hold violation that a BUFG-clocked capture would
+//        suffer from BUFG insertion delay.
 //
-// BUFG:  Global clock buffer for fabric logic (downstream processing).
-//        Has ~4 ns insertion delay but that's fine for fabric-to-fabric paths.
+// BUFG:  Global clock buffer for fabric logic (downstream processing and
+//        the BUFIO→BUFG re-register stage). ~4 ns insertion delay, fine
+//        for fabric-to-fabric paths.
 // ============================================================================
-wire adc_dco_bufio;   // Near-zero delay — drives IDDR only
+wire adc_dco_bufio;   // Near-zero delay — drives IOB IFFs only
 wire adc_dco_buffered; // BUFG output — drives fabric logic
 
 BUFIO bufio_dco (
@@ -87,57 +90,58 @@ adc_clk_mmcm mmcm_inst (
 );
 assign adc_dco_bufg = adc_dco_buffered;
 
-// IDDR for capturing DDR data
-wire [7:0] adc_data_rise;  // Data on rising edge (BUFIO domain)
-wire [7:0] adc_data_fall;  // Data on falling edge (BUFIO domain)
+// AUDIT-C4 (2026-05-01): AD9484 outputs SDR LVDS (datasheet p.5: "Output
+// (LVDS—SDR)"; p.16: "data outputs are valid on the rising edge of DCO").
+// One new sample per DCO period (DCO=fs=400 MHz); data is held stable for
+// the full period. The chip has no DDR mode and no SPI access (CSB tied
+// high on the production board, see Main_Board.sch:46719) so no register
+// can change this.
+//
+// Capture on the FALLING DCO edge — 1.25 ns inside AD9484's stable data
+// window. The rising DCO edge coincides with the AD9484 data transition
+// (tSKEW = ±70 ps vs typical IFF setup ~150 ps), which would be
+// functionally metastable; the falling edge has ~0.4 ns of setup margin
+// against tPD = 0.85 ns. IOB=TRUE forces the FF into the input I/O block,
+// giving near-zero clock-to-Q insertion delay matched to BUFIO.
+//
+// Previous (broken) behaviour: an IDDR captured both edges and a `dco_phase`
+// FSM alternated Q1/Q2 in an attempt to demux a "DDR" stream. Because the
+// chip is SDR, both edges represent the same sample, and the alternation
+// produced approximately [s_{-1}, s_1, s_1, s_3, s_3, …] — odd-sample
+// duplication with even-sample loss, equivalent to decimate-by-2 +
+// ZOH upsample-by-2. The downstream 120 MHz IF then folded to ~80 MHz
+// and corrupted the DDC. See git log for the audit trail.
+(* IOB = "TRUE" *) reg [7:0] adc_data_iff;
 
-genvar j;
-generate
-    for (j = 0; j < 8; j = j + 1) begin : iddr_gen
-        IDDR #(
-            .DDR_CLK_EDGE("SAME_EDGE_PIPELINED"),
-            .INIT_Q1(1'b0),
-            .INIT_Q2(1'b0),
-            .SRTYPE("SYNC")
-        ) iddr_inst (
-            .Q1(adc_data_rise[j]),   // Rising edge data
-            .Q2(adc_data_fall[j]),   // Falling edge data
-            .C(adc_dco_bufio),       // BUFIO clock (near-zero insertion delay)
-            .CE(1'b1),
-            .D(adc_data[j]),
-            .R(1'b0),
-            .S(1'b0)
-        );
-    end
-endgenerate
+always @(negedge adc_dco_bufio) begin
+    adc_data_iff <= adc_data;
+end
 
 // ============================================================================
-// Re-register IDDR outputs into BUFG domain
-// IDDR with SAME_EDGE_PIPELINED produces outputs stable for a full clock cycle.
+// Re-register the IFF output into the BUFG domain
+// adc_data_iff is stable from one falling DCO edge to the next (full DCO
+// period of validity), so the rising-edge BUFG capture has ample margin.
 // BUFIO and BUFG are derived from the same source (adc_dco), so they are
-// frequency-matched. This single register stage transfers from IOB (BUFIO)
-// to fabric (BUFG) with guaranteed timing.
+// frequency-matched.
 // ============================================================================
 // Timing on the BUFIO→BUFG CDC edge is governed by a 3.000 ns
 // set_max_delay in constraints/adc_clk_mmcm.xdc (1.2× the 2.500 ns period),
 // which leaves the placer free and still fits inside the ADC data-valid
-// window. IOB=TRUE and a pblock around the IDDR column were both tried
-// and rejected: IOB packing fails because the BUFG clock on these
-// capture FFs can't share the ILOGIC clock mux with the BUFIO-clocked
-// IDDR, and the pblock pulled fanout logic into the I/O region and
-// triggered router congestion on 51 unrelated paths.
-reg [7:0] adc_data_rise_bufg;
-reg [7:0] adc_data_fall_bufg;
+// window. The fabric BUFG-clocked re-register intentionally lives outside
+// the IOB — packing it back into the IOB column was tried in earlier
+// builds and rejected (the BUFG clock can't share the ILOGIC clock mux
+// with a BUFIO-domain capture, and a pblock around the IDDR column
+// pulled fanout into the I/O region and caused router congestion on 51
+// unrelated paths).
+reg [7:0] adc_data_iff_bufg;
 
 always @(posedge adc_dco_buffered) begin
-    adc_data_rise_bufg <= adc_data_rise;
-    adc_data_fall_bufg <= adc_data_fall;
+    adc_data_iff_bufg <= adc_data_iff;
 end
 
-// Combine rising and falling edge data to get 400MSPS stream
+// SDR output: one sample per BUFG cycle (400 MHz BUFG = 400 MSPS)
 reg [7:0] adc_data_400m_reg;
 reg adc_data_valid_400m_reg;
-reg dco_phase;
 
 // ── Reset synchronizer ────────────────────────────────────────
 // reset_n comes from the 100 MHz sys_clk domain.  Assertion (going low)
@@ -178,19 +182,9 @@ always @(posedge adc_dco_buffered or negedge reset_n_400m) begin
     if (!reset_n_400m) begin
         adc_data_400m_reg <= 8'b0;
         adc_data_valid_400m_reg <= 1'b0;
-        dco_phase <= 1'b0;
     end else begin
-        dco_phase <= ~dco_phase;
-        
-        if (dco_phase) begin
-            // Output falling edge data (completes the 400MSPS stream)
-            adc_data_400m_reg <= adc_data_fall_bufg;
-        end else begin
-            // Output rising edge data
-            adc_data_400m_reg <= adc_data_rise_bufg;
-        end
-        
-        adc_data_valid_400m_reg <= 1'b1; // Always valid when ADC is running
+        adc_data_400m_reg <= adc_data_iff_bufg;
+        adc_data_valid_400m_reg <= 1'b1;
     end
 end
 
@@ -198,11 +192,12 @@ assign adc_data_400m = adc_data_400m_reg;
 assign adc_data_valid_400m = adc_data_valid_400m_reg;
 
 // ============================================================================
-// Audit F-0.1: AD9484 OR (overrange) capture
-// OR is a DDR LVDS pair (same as data). Buffer it, capture both edges with an
-// IDDR in the BUFIO domain, then OR the two phases into a single clk_400m
-// flag. Register once for stability. No latching — downstream is expected to
-// stickify in its own domain.
+// Audit F-0.1 / AUDIT-C4: AD9484 OR (overrange) capture
+// OR is an SDR LVDS pair (per AD9484 datasheet — the chip outputs SDR,
+// not DDR; comment in earlier revision was wrong). One assertion per DCO
+// period, valid on the rising DCO edge, held stable for the rest of the
+// period. Captured at the falling DCO edge in the same IFF style as the
+// data path. Downstream stickifies in its own domain.
 // ============================================================================
 wire adc_or_raw;
 IBUFDS #(
@@ -214,28 +209,14 @@ IBUFDS #(
     .IB(adc_or_n)
 );
 
-wire adc_or_rise;
-wire adc_or_fall;
-IDDR #(
-    .DDR_CLK_EDGE("SAME_EDGE_PIPELINED"),
-    .INIT_Q1(1'b0),
-    .INIT_Q2(1'b0),
-    .SRTYPE("SYNC")
-) iddr_or (
-    .Q1(adc_or_rise),
-    .Q2(adc_or_fall),
-    .C(adc_dco_bufio),
-    .CE(1'b1),
-    .D(adc_or_raw),
-    .R(1'b0),
-    .S(1'b0)
-);
+(* IOB = "TRUE" *) reg adc_or_iff;
+always @(negedge adc_dco_bufio) begin
+    adc_or_iff <= adc_or_raw;
+end
 
-reg adc_or_rise_bufg;
-reg adc_or_fall_bufg;
+reg adc_or_iff_bufg;
 always @(posedge adc_dco_buffered) begin
-    adc_or_rise_bufg <= adc_or_rise;
-    adc_or_fall_bufg <= adc_or_fall;
+    adc_or_iff_bufg <= adc_or_iff;
 end
 
 reg adc_overrange_r;
@@ -243,7 +224,7 @@ always @(posedge adc_dco_buffered or negedge reset_n_400m) begin
     if (!reset_n_400m)
         adc_overrange_r <= 1'b0;
     else
-        adc_overrange_r <= adc_or_rise_bufg | adc_or_fall_bufg;
+        adc_overrange_r <= adc_or_iff_bufg;
 end
 assign adc_overrange_400m = adc_overrange_r;
 

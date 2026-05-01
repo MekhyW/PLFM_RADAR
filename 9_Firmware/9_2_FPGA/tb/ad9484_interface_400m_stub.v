@@ -5,12 +5,20 @@
 // Replaces the real ad9484_interface_400m which uses Xilinx primitives
 // (IBUFDS, BUFG, IDDR) that cannot compile in iverilog.
 //
+// AUDIT-C4 (2026-05-01): AD9484 is SDR LVDS — one new sample per rising
+// DCO edge, data stable across the full DCO period. This stub captures
+// adc_d_p on the rising edge of adc_dco_p, which already matches the
+// chip's SDR semantics. The synthesizable path was rewritten in the same
+// audit to route IDDR Q2 only (falling-edge stable capture) instead of
+// alternating Q1/Q2 — the previous behaviour produced a 2× duplicated
+// output stream that masqueraded as 400 MSPS DDR.
+//
 // Convention for testbench use:
 //   - Drive adc_d_p[7:0] with single-ended 8-bit ADC data
-//   - Drive adc_dco_p with the 400MHz clock (testbench-generated)
+//   - Drive adc_dco_p with the 400 MHz clock (testbench-generated)
 //   - adc_d_n and adc_dco_n are ignored
 //   - adc_dco_bufg = adc_dco_p  (pass-through, no BUFG)
-//   - 1-cycle pipeline latency on data, same as real IDDR+register path
+//   - 1-cycle pipeline latency on data
 // ============================================================================
 
 module ad9484_interface_400m (

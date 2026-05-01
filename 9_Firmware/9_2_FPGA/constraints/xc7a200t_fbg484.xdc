@@ -137,13 +137,15 @@ set_property DIFF_TERM TRUE [get_ports {adc_d_p[*]}]
 # --------------------------------------------------------------------------
 # Audit F-0.1 / C-15: AD9484 OR (overrange) LVDS pair
 # Pins: U20/V20 = IO_L11P/L11N_T1_SRCC_14 (same T1 clock tile as adc_dco on
-# L12_MRCC at W19/W20). Co-locating OR in T1 keeps the IBUFDS→BUFIO→IDDR
-# capture topology identical to adc_d_p[*] (data is the same DDR class).
+# L12_MRCC at W19/W20). Co-locating OR in T1 keeps the IBUFDS→BUFIO→IFF
+# capture topology identical to adc_d_p[*] (both are AD9484 SDR LVDS — see
+# AUDIT-C4 in ad9484_interface_400m.v; an earlier comment incorrectly
+# called this DDR).
 # This is the FPGA-team RECOMMENDATION for the production PCB (NEW design);
 # the PCB designer must route AD9484 OR+ → U20 and OR− → V20.
 # AD9484 datasheet: pin 23 = OR+ (LVDS_OUTPUT_OR_P), pin 24 = OR− (LVDS_OUTPUT_OR_N).
 # (50T board uses M6/N6 = L19_T3 on FTG256 — different package, different
-# tile, but same end-to-end IBUFDS→BUFIO→IDDR topology in RTL.
+# tile, but same end-to-end IBUFDS→BUFIO→IFF topology in RTL.
 # Hold false_path on adc_or_p is applied in adc_clk_mmcm.xdc.)
 # --------------------------------------------------------------------------
 set_property PACKAGE_PIN U20 [get_ports {adc_or_p}]
