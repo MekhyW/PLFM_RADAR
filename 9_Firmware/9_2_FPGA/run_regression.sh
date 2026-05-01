@@ -299,9 +299,9 @@ run_mf_cosim() {
     output=$(timeout 120 vvp "$vvp" 2>&1) || true
     rm -f "$vvp"
 
-    # Check TB internal pass/fail
+    # Check TB internal pass/fail (allow leading whitespace; see run_test note)
     local tb_fail
-    tb_fail=$(echo "$output" | grep -Ec '^\[FAIL' || true)
+    tb_fail=$(echo "$output" | grep -Ec '^[[:space:]]*\[FAIL' || true)
     if [[ "$tb_fail" -gt 0 ]]; then
         echo -e "${RED}FAIL${NC} (TB internal failure)"
         ERRORS="$ERRORS\n  MF Co-Sim ($name): TB internal failure"
@@ -360,9 +360,9 @@ run_doppler_cosim() {
     output=$(timeout 120 vvp "$vvp" 2>&1) || true
     rm -f "$vvp"
 
-    # Check TB internal pass/fail
+    # Check TB internal pass/fail (allow leading whitespace; see run_test note)
     local tb_fail
-    tb_fail=$(echo "$output" | grep -Ec '^\[FAIL' || true)
+    tb_fail=$(echo "$output" | grep -Ec '^[[:space:]]*\[FAIL' || true)
     if [[ "$tb_fail" -gt 0 ]]; then
         echo -e "${RED}FAIL${NC} (TB internal failure)"
         ERRORS="$ERRORS\n  Doppler Co-Sim ($name): TB internal failure"
@@ -427,9 +427,12 @@ run_test() {
     # informational tags like `[FAIL-INFO]` (used for known unrelated bugs,
     # e.g. RX-NEW-1 fft_engine bin-shift in tb_matched_filter_processing_chain.v)
     # which would otherwise false-fire as real failures.
+    # Allow leading whitespace — many TBs emit "  [PASS]" with indentation
+    # (the historical anchor `^[PASS]` silently missed those, hiding 22+
+    # failures across tb_system_e2e / tb_fft_engine / tb_fullchain_realdata).
     local test_pass test_fail
-    test_pass=$(echo "$output" | grep -Ec '^\[PASS( [0-9]+)?\]' || true)
-    test_fail=$(echo "$output" | grep -Ec '^\[FAIL( [0-9]+)?\]' || true)
+    test_pass=$(echo "$output" | grep -Ec '^[[:space:]]*\[PASS( [0-9]+)?\]' || true)
+    test_fail=$(echo "$output" | grep -Ec '^[[:space:]]*\[FAIL( [0-9]+)?\]' || true)
 
     if [[ "$test_fail" -gt 0 ]]; then
         echo -e "${RED}FAIL${NC} (pass=$test_pass, fail=$test_fail)"
