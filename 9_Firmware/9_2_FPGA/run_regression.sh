@@ -708,6 +708,52 @@ run_test --timeout=600 "RX-B Full-Chain Autocorrelation (tb_rxb_fullchain_latenc
     fft_engine_axi_bridge.v frequency_matched_filter.v \
     chirp_reference_rom.v
 
+# ---------------------------------------------------------------------------
+# T-6 independent reference drift cosim (PR-M).
+# Bytewise spot-checks of NCO_SINE_LUT, fft_twiddle_{16,2048}.mem, and
+# DOPPLER_WINDOW_COEFF against analytical Q15 values, plus end-to-end peak
+# and roundtrip invariants for NCO / FFT / MF / Doppler. Catches the bug
+# class where a transcription error exists identically in both fpga_model.py
+# (RTL-mirroring twin) and the RTL — which the bit-exact cosim cannot detect
+# because both sides of that comparison are computing the same wrong values.
+# Pure Python (numpy + scipy), ~1 s wall, no iverilog compile.
+#
+# Required deps: numpy, scipy (declared in pyproject.toml dev group).
+# Install with:  uv sync --group dev    (from repo root)
+# CI handles this in the fpga-regression job; locally activate the
+# resulting .venv (or use `uv run bash run_regression.sh`).
+# If a dep is missing the script emits a [SKIP] marker and exits with
+# code 2; the regression treats it as SKIP rather than FAIL so the
+# missing-dep state is visible without breaking the gate.
+# ---------------------------------------------------------------------------
+printf "  %-46s" "Independent Reference Drift (T-6)"
+set +e
+drift_output=$(python3 tb/cosim/compare_independent.py 2>&1)
+drift_rc=$?
+set -e
+drift_pass=$(echo "$drift_output" | grep -Ec '^[[:space:]]*\[PASS\]' || true)
+drift_fail=$(echo "$drift_output" | grep -Ec '^[[:space:]]*\[FAIL\]' || true)
+if [[ "$drift_rc" -eq 2 ]]; then
+    # Script signalled missing-dep skip. Show its message body so the
+    # operator knows which package to install.
+    echo -e "${YELLOW}SKIP${NC} (missing python dep — see below)"
+    echo "$drift_output" | sed 's/^/    /'
+    SKIP=$((SKIP + 1))
+elif [[ "$drift_fail" -gt 0 ]]; then
+    echo -e "${RED}FAIL${NC} (pass=$drift_pass, fail=$drift_fail)"
+    ERRORS="$ERRORS\n  Independent Reference Drift: $drift_fail failure(s)"
+    echo "$drift_output" | sed 's/^/    /'
+    FAIL=$((FAIL + 1))
+elif [[ "$drift_pass" -gt 0 && "$drift_rc" -eq 0 ]]; then
+    echo -e "${GREEN}PASS${NC} ($drift_pass checks)"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}FAIL${NC} (rc=$drift_rc, no clean PASS/FAIL markers)"
+    ERRORS="$ERRORS\n  Independent Reference Drift: rc=$drift_rc"
+    echo "$drift_output" | sed 's/^/    /'
+    FAIL=$((FAIL + 1))
+fi
+
 echo ""
 
 # ===========================================================================

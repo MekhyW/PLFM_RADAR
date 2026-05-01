@@ -69,7 +69,10 @@ jobs:
         working-directory: 9_Firmware/9_1_Microcontroller/tests
 
   # ===========================================================================
-  # FPGA RTL Regression (25 testbenches + lint)
+  # FPGA RTL Regression (testbenches + lint + cosim helpers)
+  # Python deps (numpy, scipy) come from the dev group in pyproject.toml
+  # and are installed via uv so the run_regression.sh cosim and T-6 drift
+  # check have everything they need.
   # ===========================================================================
   fpga-regression:
     name: FPGA Regression
@@ -78,11 +81,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install Python cosim deps (numpy + scipy)
+        run: uv sync --group dev
+
       - name: Install Icarus Verilog
         run: sudo apt-get update && sudo apt-get install -y iverilog
 
       - name: Run full FPGA regression
-        run: bash run_regression.sh
+        # uv-managed venv lives at ./.venv; activate so run_regression.sh's
+        # plain `python3` resolves to it. Without this the cosim helpers
+        # would fall back to the runner's system python (no scipy) and the
+        # T-6 drift check would emit [SKIP] instead of running.
+        run: |
+          source ../../.venv/bin/activate
+          bash run_regression.sh
         working-directory: 9_Firmware/9_2_FPGA
 
   # ===========================================================================

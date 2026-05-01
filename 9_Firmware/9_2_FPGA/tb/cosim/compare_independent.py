@@ -35,7 +35,28 @@ import math
 import sys
 from pathlib import Path
 
-import numpy as np
+# Required: numpy + scipy. If either is missing, exit code 2 with a [SKIP]
+# marker so the regression can distinguish missing-deps from real failures
+# (see run_regression.sh "Independent Reference Drift (T-6)" block).
+_MISSING = []
+try:
+    import numpy as np  # noqa: F401
+except ImportError:
+    _MISSING.append("numpy")
+try:
+    import scipy.signal.windows  # noqa: F401
+except ImportError:
+    _MISSING.append("scipy")
+if _MISSING:
+    print(
+        "  [SKIP] T-6 drift cosim requires Python packages: "
+        f"{', '.join(_MISSING)}.\n"
+        "         Install with: uv sync --group dev   (from repo root)\n"
+        "         or:           pip install numpy scipy"
+    )
+    sys.exit(2)
+
+import numpy as np  # re-import to get module binding now that we know it's there
 
 # Make local imports work when invoked from anywhere
 THIS_DIR = Path(__file__).resolve().parent

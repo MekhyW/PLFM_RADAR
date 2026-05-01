@@ -13,6 +13,7 @@ dev = [
     "ruff>=0.5",
     "pytest>=8",
     "numpy>=1.26",
+    "scipy>=1.13",   # PR-M: tb/cosim/compare_independent.py (T-6 drift cosim)
     "h5py>=3.10",
 ]
 
