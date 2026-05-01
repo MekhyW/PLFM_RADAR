@@ -17,7 +17,7 @@
 //      Catches future header-vs-body drift and confirms padding is skipped.
 //   5. PR-G G2 — MEDIUM ladder timing opcodes (0x17, 0x18) round-trip via
 //      cmd_opcode/cmd_value (the host_medium_*_cycles registers live in
-//      radar_system_top, exercised at integration level by tb_system_e2e).
+//      radar_system_top, exercised at integration level by tb_system_opcodes).
 // ============================================================================
 
 module tb_usb_protocol_v2;

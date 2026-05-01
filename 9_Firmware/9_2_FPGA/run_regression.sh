@@ -621,24 +621,34 @@ if [[ "$QUICK" -eq 0 ]]; then
         tb/tb_system_reg.vvp \
         tb/radar_system_tb.v "${SYSTEM_RTL[@]}"
 
-    # E2E integration (46 strict checks: TX, RX, USB R/W, CDC, safety, reset)
-    run_test "System E2E (tb_system_e2e)" \
-        tb/tb_system_e2e_reg.vvp \
-        tb/tb_system_e2e.v "${SYSTEM_RTL[@]}"
+    # PR-I subsuites (replace tb_system_e2e). Each TB instantiates
+    # radar_system_top with USB_MODE=1 (production FT2232H path) and
+    # carves a focused slice of what the legacy tb_system_e2e tried to
+    # cover all at once:
+    #   tb_system_opcodes   - opcode dispatch via FT2232H send_cmd (fast)
+    #   tb_system_mechanics - reset/RF/safety/CDC mechanics (fast)
+    #   tb_system_dataflow  - shallow TX + range-pipeline integration
+    #                         (slow; 18 ms sim, ~430-450 s wall on this host).
+    run_test "System Opcodes (tb_system_opcodes)" \
+        tb/tb_system_opcodes_reg.vvp \
+        tb/tb_system_opcodes.v "${SYSTEM_RTL[@]}"
 
-    # USB_MODE=1 (FT2232H production) variants of system tests
+    run_test "System Mechanics (tb_system_mechanics)" \
+        tb/tb_system_mechanics_reg.vvp \
+        tb/tb_system_mechanics.v "${SYSTEM_RTL[@]}"
+
+    run_test --timeout=600 "System Dataflow (tb_system_dataflow)" \
+        tb/tb_system_dataflow_reg.vvp \
+        tb/tb_system_dataflow.v "${SYSTEM_RTL[@]}"
+
+    # USB_MODE=1 system top — different TB, kept as a structural smoke test.
     run_test "System Top USB_MODE=1 (FT2232H)" \
         tb/tb_system_ft2232h_reg.vvp \
         -DUSB_MODE_1 \
         tb/radar_system_tb.v "${SYSTEM_RTL[@]}"
-
-    run_test "System E2E USB_MODE=1 (FT2232H)" \
-        tb/tb_system_e2e_ft2232h_reg.vvp \
-        -DUSB_MODE_1 \
-        tb/tb_system_e2e.v "${SYSTEM_RTL[@]}"
 else
-    echo "  (skipped receiver integration + system top + E2E + USB_MODE=1 variants — use without --quick)"
-    SKIP=$((SKIP + 5))
+    echo "  (skipped receiver integration + system top + opcodes/mechanics/dataflow + USB_MODE=1 — use without --quick)"
+    SKIP=$((SKIP + 6))
 fi
 
 echo ""
