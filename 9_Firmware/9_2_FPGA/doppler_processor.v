@@ -26,8 +26,13 @@
 //   bin from the SHORT vs MEDIUM vs LONG sub-frame to resolve velocity.
 //
 // WINDOW:
-//   16-point Hamming window (Q15), symmetric. Computed as:
-//     w[n] = 0.54 - 0.46 * cos(2*pi*n/15), n=0..15
+//   16-point Dolph-Chebyshev, 60 dB equiripple sidelobes (PR-M).
+//   Chosen for counter-UAS Doppler processing where strong clutter
+//   residual from MTI can leak into adjacent Doppler bins via window
+//   sidelobes; -60 dB rejection beats sym Hamming (-40 dB) by 20 dB at
+//   a 0.37 dB in-bin SNR cost and ~10 % wider main lobe.
+//   Coefficients: scipy.signal.windows.chebwin(16, at=60, sym=True) in
+//   Q15 (round(w * 32767)). Mirrored in fpga_model.WINDOW_COEFF.
 // ============================================================================
 
 `include "radar_params.vh"
@@ -46,7 +51,7 @@ module doppler_processor_optimized #(
     parameter RANGE_BINS         = `RP_MAX_OUTPUT_BINS,     // 512 (50T) / 4096 (200T)
     parameter CHIRPS_PER_FRAME   = `RP_CHIRPS_PER_FRAME,    // 48 (PR-F); legacy TBs override to 32
     parameter CHIRPS_PER_SUBFRAME = `RP_CHIRPS_PER_SUBFRAME, // 16
-    parameter WINDOW_TYPE        = 0,      // 0=Hamming, 1=Rectangular
+    parameter WINDOW_TYPE        = 0,      // 0=Dolph-Chebyshev 60 dB, 1=Rectangular
     parameter DATA_WIDTH         = `RP_DATA_WIDTH           // 16
 )(
     input wire clk,
@@ -85,33 +90,29 @@ module doppler_processor_optimized #(
 localparam NUM_SUBFRAMES = CHIRPS_PER_FRAME / CHIRPS_PER_SUBFRAME;
 
 // ==============================================
-// Window Coefficients — 16-point Hamming (Q15)
+// Window Coefficients — 16-pt Dolph-Chebyshev 60 dB (Q15, sym)
 // ==============================================
-// w[n] = 0.54 - 0.46 * cos(2*pi*n/15), n=0..15
-// Symmetric: w[n] = w[15-n]
 reg [DATA_WIDTH-1:0] window_coeff [0:15];
 
 integer w;
 initial begin
     if (WINDOW_TYPE == 0) begin
-        // 16-point Hamming window, Q15 format
-        // Computed: round(32767 * (0.54 - 0.46*cos(2*pi*n/15)))
-        window_coeff[0]  = 16'h0A3D;  // 0.0800 * 32767 = 2621
-        window_coeff[1]  = 16'h0E5C;  // 0.1116 * 32767 = 3676
-        window_coeff[2]  = 16'h1B6D;  // 0.2138 * 32767 = 7021
-        window_coeff[3]  = 16'h3088;  // 0.3790 * 32767 = 12424
-        window_coeff[4]  = 16'h4B33;  // 0.5868 * 32767 = 19251
-        window_coeff[5]  = 16'h6573;  // 0.7930 * 32767 = 25971
-        window_coeff[6]  = 16'h7642;  // 0.9245 * 32767 = 30274
-        window_coeff[7]  = 16'h7F62;  // 0.9932 * 32767 = 32610
-        window_coeff[8]  = 16'h7F62;  // symmetric
-        window_coeff[9]  = 16'h7642;
-        window_coeff[10] = 16'h6573;
-        window_coeff[11] = 16'h4B33;
-        window_coeff[12] = 16'h3088;
-        window_coeff[13] = 16'h1B6D;
-        window_coeff[14] = 16'h0E5C;
-        window_coeff[15] = 16'h0A3D;
+        window_coeff[0]  = 16'h0315;  //   789  (edge)
+        window_coeff[1]  = 16'h0A1A;  //  2586
+        window_coeff[2]  = 16'h1757;  //  5975
+        window_coeff[3]  = 16'h2B35;  // 11061
+        window_coeff[4]  = 16'h440C;  // 17420
+        window_coeff[5]  = 16'h5DF2;  // 24050
+        window_coeff[6]  = 16'h739E;  // 29598
+        window_coeff[7]  = 16'h7FFF;  // 32767  (peak)
+        window_coeff[8]  = 16'h7FFF;  // 32767  symmetric: w[n] = w[15-n]
+        window_coeff[9]  = 16'h739E;
+        window_coeff[10] = 16'h5DF2;
+        window_coeff[11] = 16'h440C;
+        window_coeff[12] = 16'h2B35;
+        window_coeff[13] = 16'h1757;
+        window_coeff[14] = 16'h0A1A;
+        window_coeff[15] = 16'h0315;
     end else begin
         for (w = 0; w < 16; w = w + 1) begin
             window_coeff[w] = 16'h7FFF;

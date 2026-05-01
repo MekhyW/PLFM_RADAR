@@ -8,9 +8,9 @@ generates the input hex files consumed by the Verilog testbench
 (tb_doppler_cosim.v).
 
 Architecture (matches chirp_scheduler.v ordering — SHORT, MEDIUM, LONG):
-  Sub-frame 0 (SHORT PRI):  chirps  0..15 -> 16-pt Hamming -> 16-pt FFT -> bins  0..15
-  Sub-frame 1 (MEDIUM PRI): chirps 16..31 -> 16-pt Hamming -> 16-pt FFT -> bins 16..31
-  Sub-frame 2 (LONG PRI):   chirps 32..47 -> 16-pt Hamming -> 16-pt FFT -> bins 32..47
+  Sub-frame 0 (SHORT PRI):  chirps  0..15 -> 16-pt Cheby -> 16-pt FFT -> bins  0..15
+  Sub-frame 1 (MEDIUM PRI): chirps 16..31 -> 16-pt Cheby -> 16-pt FFT -> bins 16..31
+  Sub-frame 2 (LONG PRI):   chirps 32..47 -> 16-pt Cheby -> 16-pt FFT -> bins 32..47
 
 Usage:
     cd ~/PLFM_RADAR/9_Firmware/9_2_FPGA/tb/cosim

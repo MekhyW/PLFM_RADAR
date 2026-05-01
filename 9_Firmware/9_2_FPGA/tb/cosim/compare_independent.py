@@ -16,7 +16,7 @@ Strategy (from highest-value to lowest):
      to its analytical Q15 value. A single corrupted entry fails here.
        * NCO_SINE_LUT (64 entries, sin(pi*k/128) Q15)
        * Twiddle ROMs (.mem files) for N=16, N=2048
-       * HAMMING_WINDOW (16 entries, sym Hamming N=16 Q15)
+       * DOPPLER_WINDOW_COEFF (16 entries, Dolph-Chebyshev 60 dB Q15)
 
   2. End-to-end peak-position invariants — feed canonical inputs
      through both twin and reference; the peak bin/index must match.
@@ -43,7 +43,7 @@ sys.path.insert(0, str(THIS_DIR))
 
 import fpga_reference as ref  # noqa: E402
 from fpga_model import (  # noqa: E402
-    HAMMING_WINDOW,
+    DOPPLER_WINDOW_COEFF,
     NCO,
     DopplerProcessor,
     FFTEngine,
@@ -59,7 +59,7 @@ from fpga_model import (  # noqa: E402
 
 TOL_NCO_LUT_LSB        = 1     # NCO_SINE_LUT: tightest possible
 TOL_TWIDDLE_LSB        = 1     # twiddle ROMs: same — quarter-wave Q15 cosine
-TOL_HAMMING_LSB        = 4     # 4 LSB ≈ 1.2e-4 rounding budget on Q15 round
+TOL_WINDOW_LSB         = 4     # 4 LSB ≈ 1.2e-4 rounding budget on Q15 round
 TOL_NCO_MAG_REL        = 0.04  # quarter-wave LUT artifact at quadrant edges
 TOL_FFT_ROUNDTRIP_LSB  = 60    # 11 stages × Q15 noise on 2048-pt; empirical
 
@@ -156,29 +156,19 @@ def check_twiddle_rom(result: CheckResult, n: int, mem_filename: str):
     )
 
 
-def check_hamming_lut(result: CheckResult):
-    print("\n--- HAMMING_WINDOW bytewise check ---")
-    win_lut = np.array(HAMMING_WINDOW, dtype=np.int64)
-    win_ref = np.round(ref.hamming_16_ideal()).astype(np.int64)
+def check_doppler_window_lut(result: CheckResult):
+    print("\n--- DOPPLER_WINDOW_COEFF bytewise check ---")
+    win_lut = np.array(DOPPLER_WINDOW_COEFF, dtype=np.int64)
+    win_ref = np.round(ref.doppler_window_ideal()).astype(np.int64)
     diff = np.abs(win_lut - win_ref)
     max_dev = int(diff.max())
     worst_idx = int(np.argmax(diff))
-    bad = [(int(i), int(win_lut[i]), int(win_ref[i]), int(diff[i]))
-           for i in range(16) if diff[i] > TOL_HAMMING_LSB]
     result.check(
-        max_dev <= TOL_HAMMING_LSB,
-        f"HAMMING_WINDOW: all 16 entries match 0.54-0.46*cos(2pi*n/15) Q15 (tol {TOL_HAMMING_LSB} LSB)",
+        max_dev <= TOL_WINDOW_LSB,
+        f"DOPPLER_WINDOW_COEFF: all 16 entries match Dolph-Chebyshev 60 dB Q15 (tol {TOL_WINDOW_LSB} LSB)",
         f"max |LUT - ideal| = {max_dev} LSB at n={worst_idx} "
         f"(LUT={int(win_lut[worst_idx])}, ideal={int(win_ref[worst_idx])})"
     )
-    if bad:
-        result.info(
-            "HAMMING_WINDOW drift detected — both fpga_model.py and "
-            "doppler_processor.v contain values that diverge from the "
-            "documented formula. Resolution: either update the comments to "
-            "reflect the actual values, or regen the LUTs to match the "
-            "formula and re-bless the affected goldens."
-        )
 
 
 # =============================================================================
@@ -400,7 +390,7 @@ def main():
     check_nco_lut(result)
     check_twiddle_rom(result, n=16,   mem_filename="fft_twiddle_16.mem")
     check_twiddle_rom(result, n=2048, mem_filename="fft_twiddle_2048.mem")
-    check_hamming_lut(result)
+    check_doppler_window_lut(result)
 
     # 2/3. End-to-end invariants
     check_nco_invariants(result)
