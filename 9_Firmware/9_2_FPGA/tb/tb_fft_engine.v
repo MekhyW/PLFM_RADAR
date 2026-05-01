@@ -292,15 +292,15 @@ initial begin
 
     // ================================================================
     // TEST GROUP 3: Single Tone (cosine at bin 4)
-    // cos(2*pi*4*n/32) -> peaks at bins 4 and N-4=28
-    // Amplitude 1000 -> each peak = 1000*N/2 = 16000
+    // cos(2*pi*4*n/N) -> peaks at bins 4 and N-4 (=12 for N=16)
+    // Amplitude 1000 -> each peak = 1000*N/2 (=8000 for N=16)
     // ================================================================
     $display("");
     $display("--- Test Group 3: Single Tone (bin 4) ---");
 
     for (i = 0; i < N; i = i + 1) begin
-        // cos(2*pi*4*i/32) in Q15-ish
-        angle = 6.28318530718 * 4.0 * i / 32.0;
+        // cos(2*pi*4*i/N) in Q15-ish
+        angle = 6.28318530718 * 4.0 * i / N;
         cos_val = $rtoi($cos(angle) * 1000.0);
         in_re[i] = cos_val;
         in_im[i] = 16'sd0;
@@ -318,15 +318,16 @@ initial begin
             max_mag_bin = i;
         end
     end
-    $display("  Tone FFT peak bin: %0d (expect 4)", max_mag_bin);
-    $display("  Tone FFT bin[4]  = %0d + j%0d", out_re[4], out_im[4]);
-    $display("  Tone FFT bin[28] = %0d + j%0d", out_re[28], out_im[28]);
-    check(max_mag_bin == 4 || max_mag_bin == 28, 
-          "Tone FFT: peak at bin 4 or 28");
-    // Bin 4 and 28 should have magnitude ~= N/2 * 1000 = 16000
+    $display("  Tone FFT peak bin: %0d (expect 4 or %0d)", max_mag_bin, N-4);
+    $display("  Tone FFT bin[4]    = %0d + j%0d", out_re[4],   out_im[4]);
+    $display("  Tone FFT bin[%0d]   = %0d + j%0d", N-4, out_re[N-4], out_im[N-4]);
+    check(max_mag_bin == 4 || max_mag_bin == (N-4),
+          "Tone FFT: peak at bin 4 or N-4");
+    // Bin 4 and N-4 should have magnitude ~= N/2 * 1000 (=8000 for N=16)
     mag = out_re[4] * out_re[4] + out_im[4] * out_im[4];
-    check(mag > 15000*15000 && mag < 17000*17000,
-          "Tone FFT: bin 4 magnitude ~= 16000");
+    check(mag > ((N*1000/2 - 1000) * (N*1000/2 - 1000)) &&
+          mag < ((N*1000/2 + 1000) * (N*1000/2 + 1000)),
+          "Tone FFT: bin 4 magnitude ~= N/2 * 1000");
 
     // ================================================================
     // TEST GROUP 4: Roundtrip (FFT then IFFT = identity)
@@ -457,14 +458,14 @@ initial begin
 
     // ================================================================
     // TEST GROUP 7: Pure imaginary input
-    // FFT of j*sin(2*pi*2*n/N) -> peaks at bins 2 and N-2
+    // FFT of j*sin(2*pi*2*n/N) -> peaks at bins 2 and N-2 (=14 for N=16)
     // ================================================================
     $display("");
     $display("--- Test Group 7: Pure Imaginary Tone (bin 2) ---");
 
     for (i = 0; i < N; i = i + 1) begin
         in_re[i] = 16'sd0;
-        angle = 6.28318530718 * 2.0 * i / 32.0;
+        angle = 6.28318530718 * 2.0 * i / N;
         in_im[i] = $rtoi($sin(angle) * 1000.0);
     end
 
@@ -480,9 +481,9 @@ initial begin
             max_mag_bin = i;
         end
     end
-    $display("  Imag tone peak bin: %0d (expect 2 or 30)", max_mag_bin);
-    check(max_mag_bin == 2 || max_mag_bin == 30,
-          "Imag tone: peak at bin 2 or 30");
+    $display("  Imag tone peak bin: %0d (expect 2 or %0d)", max_mag_bin, N-2);
+    check(max_mag_bin == 2 || max_mag_bin == (N-2),
+          "Imag tone: peak at bin 2 or N-2");
 
     // ================================================================
     // TEST GROUP 8: Zero input
