@@ -196,8 +196,10 @@ radar_receiver_final dut (
 // ============================================================================
 // SIM TIMING — driven via host_* inputs above (chirp-v2 PR-D).
 // chirp_scheduler is host-input driven; no defparam overrides needed.
-// Real values: LONG_CHIRP=3000, LONG_LISTEN=13700, GUARD=17540,
-//              SHORT_CHIRP=100 (V2), SHORT_LISTEN=17400  (~31040 per chirp).
+// Real values: LONG_CHIRP=3000,   LONG_LISTEN=13700,
+//              MEDIUM_CHIRP=500,  MEDIUM_LISTEN=15600 (PR-Q stagger),
+//              SHORT_CHIRP=100,   SHORT_LISTEN=17400  (V2),
+//              GUARD=17540.
 // The host_* assignments above feed the same compressed timing the legacy
 // defparams used.
 // ============================================================================

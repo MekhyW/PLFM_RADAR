@@ -22,8 +22,12 @@
 //   to make NUM_SUBFRAMES=2; the FSM generalises cleanly. doppler_bin still
 //   reports 6 bits there with the high bit always zero.
 //
-//   Staggered-PRF ambiguity resolution downstream picks the matching Doppler
-//   bin from the SHORT vs MEDIUM vs LONG sub-frame to resolve velocity.
+//   Staggered-PRF ambiguity resolution is host-side (see v7/processing.py
+//   unfold_velocity_crt under PR-Q). Three distinct PRIs in production —
+//   SHORT 175 µs, MEDIUM 161 µs, LONG 167 µs — give the host enough info
+//   to run 3-PRI Chinese-Remainder unfolding on Doppler aliases beyond the
+//   per-sub-frame ±~41 m/s unambiguous range. doppler_bin's high two bits
+//   carry the sub_frame ID so the host can group detections by source.
 //
 // WINDOW:
 //   16-point Dolph-Chebyshev, 60 dB equiripple sidelobes (PR-M).

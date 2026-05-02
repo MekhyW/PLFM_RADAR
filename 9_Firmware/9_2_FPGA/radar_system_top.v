@@ -270,15 +270,17 @@ reg [15:0] host_guard_cycles;         // Opcode 0x12 (default 17540)
 reg [15:0] host_short_chirp_cycles;   // Opcode 0x13 (default 100, V2)
 reg [15:0] host_short_listen_cycles;  // Opcode 0x14 (default 17400, V2)
 reg [15:0] host_medium_chirp_cycles;  // Opcode 0x17 (default 500, PR-G G2)
-reg [15:0] host_medium_listen_cycles; // Opcode 0x18 (default 17000, PR-G G2)
+reg [15:0] host_medium_listen_cycles; // Opcode 0x18 (default 15600, PR-Q staggered PRI)
 reg [5:0]  host_chirps_per_elev;      // Opcode 0x15 (default 32)
 reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
 
 // Fix 4: Doppler/chirps mismatch protection
 // DOPPLER_FRAME_CHIRPS is the fixed chirp count expected by the staggered-PRI
-// Doppler path (16 long + 16 short). If host sets chirps_per_elev to a
-// different value, Doppler accumulation is corrupted. Clamp at command decode
-// and flag the mismatch so the host knows.
+// Doppler path: 48 chirps split as 16 SHORT (175 µs PRI) + 16 MEDIUM (161 µs
+// PRI, PR-Q) + 16 LONG (167 µs PRI). Three distinct coprime PRIs let the
+// host run 3-PRI CRT to unfold Doppler aliases (C-5 / PR-Q). If host sets
+// chirps_per_elev to a different value, Doppler accumulation is corrupted.
+// Clamp at command decode and flag the mismatch so the host knows.
 localparam DOPPLER_FRAME_CHIRPS = `RP_CHIRPS_PER_FRAME; // 48 (PR-F); was 32
 reg        chirps_mismatch_error;     // Set if host tried to set chirps != FFT size
 

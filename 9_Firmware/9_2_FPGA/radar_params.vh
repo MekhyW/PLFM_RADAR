@@ -214,8 +214,15 @@
 // Reset defaults for host-configurable timing registers.
 // Match radar_mode_controller.v parameters and main.cpp STM32 defaults.
 //
-// 3-LADDER (3 km build): SHORT 1 µs, MEDIUM 5 µs, LONG 30 µs. Same listen
-// budget across waveforms (~175 µs PRI) keeps Doppler resolution uniform.
+// 3-LADDER (3 km build): SHORT 1 µs, MEDIUM 5 µs, LONG 30 µs.
+// PRI ladder is intentionally STAGGERED across waveforms — SHORT 175 µs,
+// MEDIUM 161 µs, LONG 167 µs (PR-Q). Three coprime PRIs let the host run
+// 3-PRI Chinese-Remainder unfolding on Doppler aliases (see C-5 in the
+// 2026-04-29 audit). In 3 km mode LONG is blind (4500 m blind zone) so
+// SHORT-vs-MEDIUM (Δ=14 µs / 8 %) is the operative pair; in 20 km mode
+// MEDIUM-vs-LONG (Δ=6 µs / 4 %) carries the long-range slice that has
+// SNR for both. Picking listen cycles to differ by ≥5 % keeps the alias
+// resolver robust against the 5.1 m/s/bin Doppler quantization.
 // LONG kept on 50T as legal-but-unused so 200T spin-up doesn't need a
 // second wave through the codebase.
 
@@ -228,9 +235,9 @@
 
 // 3-ladder defaults — added in PR-A, consumed by chirp_scheduler in PR-D.
 `define RP_DEF_SHORT_CHIRP_CYCLES_V2   100     // 1 µs at 100 MHz (was 0.5 µs)
-`define RP_DEF_SHORT_LISTEN_CYCLES_V2  17400   // PRI 175 µs - chirp - guard slack
+`define RP_DEF_SHORT_LISTEN_CYCLES_V2  17400   // SHORT PRI 175 µs (chirp 1 + listen 174)
 `define RP_DEF_MEDIUM_CHIRP_CYCLES     500     // 5 µs at 100 MHz
-`define RP_DEF_MEDIUM_LISTEN_CYCLES    17000   // PRI 175 µs - chirp - guard slack
+`define RP_DEF_MEDIUM_LISTEN_CYCLES    15600   // MEDIUM PRI 161 µs (chirp 5 + listen 156, PR-Q stagger)
 // LONG defaults reuse RP_DEF_LONG_CHIRP_CYCLES / RP_DEF_LONG_LISTEN_CYCLES
 `define RP_DEF_CHIRPS_PER_SUBFRAME     16      // 16 per sub-frame, 3 sub-frames = 48 frame
 `define RP_DEF_SUBFRAME_ENABLE         3'b111  // SHORT|MEDIUM|LONG all on by default
