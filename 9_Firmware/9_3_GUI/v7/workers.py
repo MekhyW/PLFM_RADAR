@@ -3,7 +3,7 @@ v7.workers — QThread-based workers and demo target simulator.
 
 Classes:
   - RadarDataWorker  — reads from FT2232H via production RadarAcquisition,
-                       parses 0xAA/0xBB packets, assembles 64x32 frames,
+                       parses bulk-frame v2 packets, assembles 512x48 frames,
                        runs host-side DSP, emits PyQt signals.
   - GPSDataWorker    — reads GPS frames from STM32 CDC, emits GPSData signals.
   - TargetSimulator  — QTimer-based demo target generator.
@@ -18,8 +18,6 @@ import random
 import queue
 import struct
 import logging
-
-import numpy as np
 
 from PyQt6.QtCore import QThread, QObject, QTimer, pyqtSignal
 
@@ -36,6 +34,7 @@ from .processing import (
     USBPacketParser,
     apply_pitch_correction,
     polar_to_geographic,
+    extract_targets_from_frame_crt,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,11 +51,11 @@ class RadarDataWorker(QThread):
     and emits PyQt signals with results.
 
     Uses production radar_protocol.py for all packet parsing and frame
-    assembly (11-byte 0xAA data packets → 64x32 RadarFrame).
-    For replay, use ReplayWorker instead.
+    assembly (bulk-frame v2 → 512x48 RadarFrame). For replay, use
+    ReplayWorker instead.
 
     Signals:
-        frameReady(RadarFrame)    — a complete 64x32 radar frame
+        frameReady(RadarFrame)    — a complete 512x48 radar frame
         statusReceived(object)    — StatusResponse from FPGA
         targetsUpdated(list)      — list of RadarTarget after host-side DSP
         errorOccurred(str)        — error message
@@ -171,81 +170,35 @@ class RadarDataWorker(QThread):
     def _run_host_dsp(self, frame: RadarFrame) -> list[RadarTarget]:
         """
         Run host-side DSP on a complete frame.
-        This is where DBSCAN clustering, Kalman tracking, and other
-        non-timing-critical processing happens.
 
-        The FPGA already does: FFT, MTI, CFAR, DC notch.
-        Host-side DSP adds: clustering, tracking, geo-coordinate mapping.
+        FPGA already provides: FFT, MTI, CFAR, DC notch (48 doppler bins =
+        3 sub-frames * 16). Host-side adds: 3-PRI CRT Doppler unfolding,
+        geo-mapping, pitch correction, DBSCAN clustering, Kalman tracking.
 
-        Bin-to-physical conversion uses RadarSettings.range_resolution
-        and velocity_resolution (should be calibrated to actual waveform).
+        PR-Q.6: detections route through ``extract_targets_from_frame_crt``
+        which derives the per-target velocity from the high 2 bits of the
+        Doppler bin (sub-frame ID) and runs the Chinese-Remainder Theorem
+        unfolder when ≥2 sub-frames see the same range. The legacy LONG-PRI
+        placeholder path is gone.
         """
-        targets: list[RadarTarget] = []
-
         cfg = self._processor.config
         if not (cfg.clustering_enabled or cfg.tracking_enabled):
-            return targets
+            return []
 
-        # Extract detections from FPGA CFAR flags
-        det_indices = np.argwhere(frame.detections > 0)
-        r_res = self._waveform.range_resolution_m
-        # PR-Q.4: per-subframe Doppler velocity is unfolded by the CRT
-        # extractor in PR-Q.5; until that lands, treat the 48-bin output
-        # as a single-PRI grid using the LONG-PRI v_res (most conservative
-        # — smallest v_unamb).  This intentionally yields wrong velocities
-        # for SHORT/MEDIUM sub-frame bins until PR-Q.5 replaces this path
-        # with extract_targets_from_frame_crt.
-        v_res = self._waveform.velocity_resolution_long_mps
-        n_doppler = (
-            frame.detections.shape[1]
-            if frame.detections.ndim == 2
-            else self._waveform.n_doppler_bins
+        targets = extract_targets_from_frame_crt(
+            frame, self._waveform, gps=self._gps,
         )
-        doppler_center = n_doppler // 2
 
-        for idx in det_indices:
-            rbin, dbin = idx
-            mag = frame.magnitude[rbin, dbin]
-            snr = 10 * np.log10(max(mag, 1)) if mag > 0 else 0
+        # Pitch correction: extract_targets_from_frame_crt sets elevation=0.0
+        # because the array is single-beam. Adjust by GPS pitch when known.
+        if self._gps and targets:
+            corrected_pitch = apply_pitch_correction(0.0, self._gps.pitch)
+            for t in targets:
+                t.elevation = corrected_pitch
 
-            # Convert bin indices to physical units
-            range_m = float(rbin) * r_res
-            velocity_ms = float(dbin - doppler_center) * v_res
-
-            # Apply pitch correction if GPS data available
-            raw_elev = 0.0  # FPGA doesn't send elevation per-detection
-            corr_elev = raw_elev
-            if self._gps:
-                corr_elev = apply_pitch_correction(raw_elev, self._gps.pitch)
-
-            # Compute geographic position if GPS available
-            lat, lon = 0.0, 0.0
-            azimuth = 0.0  # No azimuth from single-beam; set to heading
-            if self._gps:
-                azimuth = self._gps.heading
-                lat, lon = polar_to_geographic(
-                    self._gps.latitude, self._gps.longitude,
-                    range_m, azimuth,
-                )
-
-            target = RadarTarget(
-                id=len(targets),
-                range=range_m,
-                velocity=velocity_ms,
-                azimuth=azimuth,
-                elevation=corr_elev,
-                latitude=lat,
-                longitude=lon,
-                snr=snr,
-                timestamp=frame.timestamp,
-            )
-            targets.append(target)
-
-        # DBSCAN clustering
-        if cfg.clustering_enabled and len(targets) > 0:
+        if cfg.clustering_enabled and targets:
             clusters = self._processor.clustering(
                 targets, cfg.clustering_eps, cfg.clustering_min_samples)
-            # Associate and track
             if cfg.tracking_enabled:
                 targets = self._processor.association(targets, clusters)
                 self._processor.tracking(targets)
@@ -462,7 +415,6 @@ class ReplayWorker(QThread):
         super().__init__(parent)
         import threading
 
-        from .processing import extract_targets_from_frame
         from .models import WaveformConfig
 
         self._engine = replay_engine
@@ -470,7 +422,10 @@ class ReplayWorker(QThread):
         self._gps = gps
         self._waveform = WaveformConfig()
         self._frame_interval_ms = frame_interval_ms
-        self._extract_targets = extract_targets_from_frame
+        # PR-Q.6: replay path uses the same 3-PRI CRT extractor as the live
+        # worker so 48-bin frames yield CRT-unfolded velocities; 32-bin
+        # legacy recordings fall back to single-PRI inside the extractor.
+        self._extract_targets = extract_targets_from_frame_crt
 
         self._current_index = 0
         self._last_emitted_index = 0
@@ -575,16 +530,7 @@ class ReplayWorker(QThread):
         self.frameReady.emit(frame)
         self.frameIndexChanged.emit(index, self._engine.total_frames)
 
-        # Target extraction.  PR-Q.4: single LONG-PRI v_res placeholder;
-        # PR-Q.5 replaces this call with extract_targets_from_frame_crt
-        # which derives per-subframe velocity from the high 2 bits of
-        # doppler_bin and runs 3-PRI CRT unfolding.
-        targets = self._extract_targets(
-            frame,
-            range_resolution=self._waveform.range_resolution_m,
-            velocity_resolution=self._waveform.velocity_resolution_long_mps,
-            gps=self._gps,
-        )
+        targets = self._extract_targets(frame, self._waveform, gps=self._gps)
         self.targetsUpdated.emit(targets)
         self.statsUpdated.emit({
             "frame_number": frame.frame_number,
