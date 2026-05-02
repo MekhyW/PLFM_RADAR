@@ -759,13 +759,21 @@ class RadarDashboard(QMainWindow):
         grp_wf = QGroupBox("Waveform Timing")
         wf_layout = QVBoxLayout(grp_wf)
 
+        # PR-R / M-2: MEDIUM chirp+listen exposed (RTL has had 0x17/0x18 since
+        #  PR-G G2; defaults RP_DEF_MEDIUM_*_CYCLES_V2 = 500 / 15600 give
+        #  PRI = 161 us for the 3-PRI ladder).
+        # PR-R / M-7: CHIRPS_PER_ELEV default 32 -> 48 to match PR-F's
+        #  RP_CHIRPS_PER_FRAME = 48; FPGA latches `chirps_mismatch_error` for
+        #  any value other than 48, so the spinbox cannot offer 32 anymore.
         wf_params = [
-            ("Long Chirp Cycles",   0x10, 3000,  16, "0-65535, rst=3000"),
-            ("Long Listen Cycles",  0x11, 13700, 16, "0-65535, rst=13700"),
-            ("Guard Cycles",        0x12, 17540, 16, "0-65535, rst=17540"),
-            ("Short Chirp Cycles",  0x13, 50,    16, "0-65535, rst=50"),
-            ("Short Listen Cycles", 0x14, 17450, 16, "0-65535, rst=17450"),
-            ("Chirps Per Elevation", 0x15, 32,    6, "1-32, clamped"),
+            ("Long Chirp Cycles",    0x10, 3000,  16, "0-65535, rst=3000"),
+            ("Long Listen Cycles",   0x11, 13700, 16, "0-65535, rst=13700"),
+            ("Guard Cycles",         0x12, 17540, 16, "0-65535, rst=17540"),
+            ("Short Chirp Cycles",   0x13, 100,   16, "0-65535, rst=100 (1us @100MHz)"),
+            ("Short Listen Cycles",  0x14, 17400, 16, "0-65535, rst=17400 (175us PRI)"),
+            ("Medium Chirp Cycles",  0x17, 500,   16, "0-65535, rst=500 (5us @100MHz)"),
+            ("Medium Listen Cycles", 0x18, 15600, 16, "0-65535, rst=15600 (161us PRI)"),
+            ("Chirps Per Elevation", 0x15, 48,    6,  "must be 48 (RTL clamps)"),
         ]
         for label, opcode, default, bits, hint in wf_params:
             self._add_fpga_param_row(wf_layout, label, opcode, default, bits, hint)
@@ -782,12 +790,15 @@ class RadarDashboard(QMainWindow):
         grp_cfar = QGroupBox("Detection (CFAR)")
         cfar_layout = QVBoxLayout(grp_cfar)
 
+        # PR-R / M-2: CFAR_ALPHA_SOFT (0x2D) is the soft-tier (CAND) threshold
+        # of the 2-class CFAR; default RP_DEF_CFAR_ALPHA_SOFT = 0x18 (1.5 Q4.4).
         cfar_params = [
-            ("CFAR Enable",       0x25, 0,  1,  "0=off, 1=on"),
-            ("CFAR Guard Cells",  0x21, 2,  4,  "0-15, rst=2"),
-            ("CFAR Train Cells",  0x22, 8,  5,  "1-31, rst=8"),
-            ("CFAR Alpha (Q4.4)", 0x23, 48, 8,  "0-255, rst=0x30=3.0"),
-            ("CFAR Mode",         0x24, 0,  2,  "0=CA 1=GO 2=SO"),
+            ("CFAR Enable",            0x25, 0,  1,  "0=off, 1=on"),
+            ("CFAR Guard Cells",       0x21, 2,  4,  "0-15, rst=2"),
+            ("CFAR Train Cells",       0x22, 8,  5,  "1-31, rst=8"),
+            ("CFAR Alpha (Q4.4)",      0x23, 48, 8,  "0-255, rst=0x30=3.0"),
+            ("CFAR Alpha Soft (Q4.4)", 0x2D, 24, 8,  "0-255, rst=0x18=1.5"),
+            ("CFAR Mode",              0x24, 0,  2,  "0=CA 1=GO 2=SO"),
         ]
         for label, opcode, default, bits, hint in cfar_params:
             self._add_fpga_param_row(cfar_layout, label, opcode, default, bits, hint)
@@ -845,6 +856,41 @@ class RadarDashboard(QMainWindow):
         agc_layout.addWidget(agc_st_group)
 
         right_layout.addWidget(grp_agc)
+
+        # ── ADC (AD9484) ──────────────────────────────────────────────
+        # PR-R / M-3 + M-4: AD9484 has SPI tied off (CSB high) so all runtime
+        # control is via these two opcodes. PWDN is the physical AD9484
+        # power-down pin; FORMAT switches the DDC sign convention to match
+        # the SJ1 strap (offset-binary vs two's-complement).
+        grp_adc = QGroupBox("ADC (AD9484)")
+        adc_layout = QVBoxLayout(grp_adc)
+
+        # Power-down toggle (0x32). Two buttons rather than a spinbox so
+        # the operator cannot accidentally type a non-{0,1} value.
+        adc_pd_row = QHBoxLayout()
+        btn_adc_normal = QPushButton("ADC Normal")
+        btn_adc_normal.clicked.connect(lambda: self._send_fpga_cmd(0x32, 0))
+        adc_pd_row.addWidget(btn_adc_normal)
+        btn_adc_pd = QPushButton("ADC Power Down")
+        btn_adc_pd.clicked.connect(lambda: self._send_fpga_cmd(0x32, 1))
+        adc_pd_row.addWidget(btn_adc_pd)
+        adc_layout.addLayout(adc_pd_row)
+
+        # Sign-convention combo (0x33). 0 = offset-binary (default), 1 = two's-
+        # complement. _add_fpga_param_row would force a spinbox, so do it inline.
+        adc_fmt_row = QHBoxLayout()
+        adc_fmt_row.addWidget(QLabel("ADC Format:"))
+        self._adc_format_combo = QComboBox()
+        self._adc_format_combo.addItem("Offset-binary (SJ1 1-2)", 0)
+        self._adc_format_combo.addItem("Two's-complement (SJ1 2-3)", 1)
+        adc_fmt_row.addWidget(self._adc_format_combo, stretch=1)
+        btn_adc_fmt = QPushButton("Set")
+        btn_adc_fmt.clicked.connect(
+            lambda: self._send_fpga_cmd(0x33, self._adc_format_combo.currentData()))
+        adc_fmt_row.addWidget(btn_adc_fmt)
+        adc_layout.addLayout(adc_fmt_row)
+
+        right_layout.addWidget(grp_adc)
 
         # Custom Command
         grp_custom = QGroupBox("Custom Command")
@@ -1600,11 +1646,21 @@ class RadarDashboard(QMainWindow):
         self._replay_frame_label.setText(f"{current} / {total}")
 
     def _dispatch_to_software_fpga(self, opcode: int, value: int):
-        """Route an FPGA opcode+value to the SoftwareFPGA setter."""
+        """Route an FPGA opcode+value to the SoftwareFPGA setter.
+
+        PR-R / M-6: opcodes split into three classes:
+          - APPLIED  — affect the host signal-processing chain in replay
+                       (CFAR, MTI, DC-notch, AGC mirror, gain, threshold).
+          - INERT    — RTL-only state with no effect on already-recorded
+                       playback (chirp timing, range mode, ADC controls,
+                       self-test, status). Logged at info so the operator
+                       sees the change was acknowledged but not applied.
+          - UNKNOWN  — unmapped opcode, debug-only.
+        """
         fpga = self._software_fpga
         if fpga is None:
             return
-        _opcode_dispatch = {
+        applied = {
             0x03: lambda v: fpga.set_detect_threshold(v),
             0x16: lambda v: fpga.set_gain_shift(v),
             0x21: lambda v: fpga.set_cfar_guard(v),
@@ -1619,11 +1675,25 @@ class RadarDashboard(QMainWindow):
             0x2A: lambda v: fpga.set_agc_params(attack=v),
             0x2B: lambda v: fpga.set_agc_params(decay=v),
             0x2C: lambda v: fpga.set_agc_params(holdoff=v),
+            0x2D: lambda v: fpga.set_cfar_alpha_soft(v),
         }
-        handler = _opcode_dispatch.get(opcode)
+        # Inert in replay: RTL-only chirp timing / range mode / self-test /
+        # status / ADC strap. The recorded I/Q already reflects whatever
+        # values were active at capture time; changing them now would
+        # require re-running the chirp generator.
+        inert = {
+            0x01, 0x02, 0x04,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x17, 0x18,
+            0x20, 0x30, 0x31, 0x32, 0x33, 0xFF,
+        }
+        handler = applied.get(opcode)
         if handler is not None:
             handler(value)
             logger.info(f"SoftwareFPGA: 0x{opcode:02X} = {value}")
+        elif opcode in inert:
+            logger.info(
+                f"SoftwareFPGA: 0x{opcode:02X} = {value} acknowledged "
+                f"(no effect on replay — RTL-only state)")
         else:
             logger.debug(f"SoftwareFPGA: opcode 0x{opcode:02X} not handled (no-op)")
 

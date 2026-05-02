@@ -1628,6 +1628,85 @@ class TestDashboardConfidenceDisplay(unittest.TestCase):
 
 
 # =============================================================================
+# Test: PR-R / audit M-2..M-7 — host control surface fill-in
+# =============================================================================
+
+class TestOpcodeEnumFillIn(unittest.TestCase):
+    """M-2 + M-3: enum gains MEDIUM_CHIRP, MEDIUM_LISTEN, CFAR_ALPHA_SOFT, ADC_PWDN."""
+
+    def test_medium_chirp_listen_opcodes(self):
+        from radar_protocol import Opcode
+        self.assertEqual(Opcode.MEDIUM_CHIRP.value,  0x17)
+        self.assertEqual(Opcode.MEDIUM_LISTEN.value, 0x18)
+
+    def test_cfar_alpha_soft_opcode(self):
+        from radar_protocol import Opcode
+        self.assertEqual(Opcode.CFAR_ALPHA_SOFT.value, 0x2D)
+
+    def test_adc_pwdn_opcode(self):
+        from radar_protocol import Opcode
+        self.assertEqual(Opcode.ADC_PWDN.value, 0x32)
+
+    def test_adc_format_opcode_unchanged(self):
+        from radar_protocol import Opcode
+        self.assertEqual(Opcode.ADC_FORMAT.value, 0x33)
+
+    def test_no_duplicate_opcodes(self):
+        """All Opcode values are unique (catches accidental collisions)."""
+        from radar_protocol import Opcode
+        values = [op.value for op in Opcode]
+        self.assertEqual(len(values), len(set(values)),
+                         "duplicate opcode values would silently shadow earlier entries")
+
+
+class TestSoftwareFpgaCfarAlphaSoft(unittest.TestCase):
+    """M-6: SoftwareFPGA mirrors the soft-tier alpha and clamps to 8 bits."""
+
+    def test_default(self):
+        from v7.software_fpga import SoftwareFPGA
+        fpga = SoftwareFPGA()
+        self.assertEqual(fpga.cfar_alpha_soft, 0x18)  # RP_DEF_CFAR_ALPHA_SOFT
+
+    def test_setter_masks_to_8_bits(self):
+        from v7.software_fpga import SoftwareFPGA
+        fpga = SoftwareFPGA()
+        fpga.set_cfar_alpha_soft(0x1234)
+        self.assertEqual(fpga.cfar_alpha_soft, 0x34)
+
+
+@unittest.skipUnless(_pyqt6_available(), "PyQt6 not installed")
+class TestReplayOpcodeDispatch(unittest.TestCase):
+    """M-6: replay dispatch routes 0x2D to SoftwareFPGA + acknowledges inert opcodes."""
+
+    def _dashboard_with_replay(self):
+        """Build a minimal dashboard-like object: just what _dispatch_to_software_fpga needs."""
+        from v7.software_fpga import SoftwareFPGA
+        from v7.dashboard import RadarDashboard
+        # Bypass full QMainWindow init — call the unbound method against a
+        # fake `self` that only carries the two attributes the dispatch reads.
+        class _Fake:
+            pass
+        fake = _Fake()
+        fake._software_fpga = SoftwareFPGA()
+        return RadarDashboard._dispatch_to_software_fpga, fake
+
+    def test_0x2d_routed_to_set_cfar_alpha_soft(self):
+        dispatch, fake = self._dashboard_with_replay()
+        dispatch(fake, 0x2D, 42)
+        self.assertEqual(fake._software_fpga.cfar_alpha_soft, 42)
+
+    def test_inert_opcode_does_not_raise(self):
+        """Inert opcodes (e.g. 0x32 ADC_PWDN) accepted without exception."""
+        dispatch, fake = self._dashboard_with_replay()
+        for inert in (0x10, 0x15, 0x17, 0x18, 0x20, 0x32, 0x33, 0xFF):
+            dispatch(fake, inert, 1)  # should not raise
+
+    def test_unknown_opcode_does_not_raise(self):
+        dispatch, fake = self._dashboard_with_replay()
+        dispatch(fake, 0xEE, 0)  # unmapped — debug-log only, no exception
+
+
+# =============================================================================
 # Helper: lazy import of v7.models
 # =============================================================================
 

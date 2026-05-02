@@ -91,7 +91,8 @@ class SoftwareFPGA:
         self.cfar_enable: bool = False         # 0x25
         self.cfar_guard: int = 2               # 0x21
         self.cfar_train: int = 8               # 0x22
-        self.cfar_alpha: int = 0x30            # 0x23  Q4.4
+        self.cfar_alpha: int = 0x30            # 0x23  Q4.4 (CONFIRM tier)
+        self.cfar_alpha_soft: int = 0x18       # 0x2D  Q4.4 (CAND tier, PR-G)
         self.cfar_mode: int = 0                # 0x24  0=CA,1=GO,2=SO
 
         # MTI
@@ -128,6 +129,9 @@ class SoftwareFPGA:
 
     def set_cfar_alpha(self, val: int) -> None:
         self.cfar_alpha = int(val) & 0xFF
+
+    def set_cfar_alpha_soft(self, val: int) -> None:
+        self.cfar_alpha_soft = int(val) & 0xFF
 
     def set_cfar_mode(self, val: int) -> None:
         self.cfar_mode = int(val) & 0x03
