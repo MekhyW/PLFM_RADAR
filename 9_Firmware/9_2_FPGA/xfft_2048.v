@@ -56,8 +56,8 @@ module xfft_2048 (
     output wire        s_axis_data_tready,
 
     // Data output channel (AXI-Stream master). 64-bit packed {Q[31:0], I[31:0]}.
-    // No tuser — scaled mode does not emit BLK_EXP, and the design has no
-    // XK_INDEX / OVFLO consumers.
+    // No tuser — scaled mode does not emit BLK_EXP, and the IP is configured
+    // with no XK_INDEX / OVFLO outputs (see gen_xfft_2048_ip.tcl).
     output wire [63:0] m_axis_data_tdata,
     output wire        m_axis_data_tvalid,
     output wire        m_axis_data_tlast,
@@ -68,15 +68,11 @@ module xfft_2048 (
 // ============================================================================
 // XILINX LOGICORE FFT v9.1 — production / XSim path
 // ============================================================================
-// Side-channels (status/event) are tied off here; if downstream needs them
-// (e.g. for pipeline-stall debug), surface them through this wrapper.
-
-wire [7:0] xfft_status_tdata;
-wire       xfft_status_tvalid;
-// tuser still exists on the IP port surface (Vivado emits a 1-bit dummy in
-// scaled mode with no XK_INDEX/OVFLO). Wired to a local sink so the placer
-// elides it.
-wire [7:0] xfft_dout_tuser_unused;
+// Per the regenerated IP (Pipelined Streaming + scaled + 1 channel + no CP +
+// no XK_INDEX / no OVFLO), the IP exposes only the AXI-Stream config / data
+// channels and six event signals. There is no m_axis_data_tuser and no
+// m_axis_status_* channel in this configuration. Event signals are left
+// unconnected — none are consumed downstream.
 
 xfft_2048_ip u_xfft (
     .aclk                        (aclk),
@@ -88,13 +84,9 @@ xfft_2048_ip u_xfft (
     .s_axis_data_tready          (s_axis_data_tready),
     .s_axis_data_tlast           (s_axis_data_tlast),
     .m_axis_data_tdata           (m_axis_data_tdata),
-    .m_axis_data_tuser           (xfft_dout_tuser_unused),
     .m_axis_data_tvalid          (m_axis_data_tvalid),
     .m_axis_data_tready          (m_axis_data_tready),
     .m_axis_data_tlast           (m_axis_data_tlast),
-    .m_axis_status_tdata         (xfft_status_tdata),
-    .m_axis_status_tvalid        (xfft_status_tvalid),
-    .m_axis_status_tready        (1'b1),
     .event_frame_started         (),
     .event_tlast_unexpected      (),
     .event_tlast_missing         (),

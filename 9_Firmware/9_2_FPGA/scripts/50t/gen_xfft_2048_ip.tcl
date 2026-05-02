@@ -6,7 +6,9 @@
 #   - Architecture:     Pipelined Streaming I/O (Radix-2, 11 stages)
 #   - Data Format:      Fixed Point
 #   - Scaling:          Scaled (fixed schedule via cfg_tdata SCALE_SCH bits)
-#                       Schedule [1,1,1,1,1,1,1,1,1,1,1] = /N (unitary FFT).
+#                       Schedule = 12'hAA9 (PG109 Pipelined Streaming layout):
+#                       stage 1 alone >>1, stages 2-3, 4-5, 6-7, 8-9, 10-11
+#                       grouped each >>2 (per pair). Total = /N = unitary FFT.
 #                       AUDIT-C10/C-8 resolution: BFP previously hid a per-frame
 #                       block exponent the bridge dropped, making sim/silicon
 #                       absolute magnitudes incomparable. Scaled mode locks a

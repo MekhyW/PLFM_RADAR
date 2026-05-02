@@ -23,8 +23,9 @@ mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
 echo "===== Compiling Verilog sources ====="
-# Wrapper + testbench with the IP-on define
-xvlog -d FFT_USE_XILINX_IP "$WRAPPER" "$TB"
+# Wrapper + testbench with the IP-on define. -i adds the FPGA root so
+# `include "radar_params.vh"` resolves from inside tb/.
+xvlog -d FFT_USE_XILINX_IP -i "$PROJ_ROOT" "$WRAPPER" "$TB"
 # IP simulation netlist — references unisim primitives
 xvlog "$IP_NETLIST"
 # fft_engine etc. NOT needed because FFT_USE_XILINX_IP routes around it,
