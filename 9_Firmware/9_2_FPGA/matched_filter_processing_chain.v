@@ -123,18 +123,36 @@ reg [3:0] state;
 
 // ============================================================================
 // DATA BUFFERS (block RAM) — declared here, accessed in BRAM port blocks
+// sig_buf / ref_buf hold the 16-bit FWD-FFT outputs (sat-truncated from the
+// 32-bit bridge output — FWD inputs are 16-bit ADC/ref so /N-scaled bin
+// magnitudes fit). prod_buf is 32-bit because it carries the conjugate-mult
+// Q30 product into the IFFT and the IFFT's 32-bit output back out (PR-O.7).
 // ============================================================================
 (* ram_style = "block" *) reg signed [15:0] sig_buf_i [0:FFT_SIZE-1];
 (* ram_style = "block" *) reg signed [15:0] sig_buf_q [0:FFT_SIZE-1];
 (* ram_style = "block" *) reg signed [15:0] ref_buf_i [0:FFT_SIZE-1];
 (* ram_style = "block" *) reg signed [15:0] ref_buf_q [0:FFT_SIZE-1];
-(* ram_style = "block" *) reg signed [15:0] prod_buf_i [0:FFT_SIZE-1];
-(* ram_style = "block" *) reg signed [15:0] prod_buf_q [0:FFT_SIZE-1];
+(* ram_style = "block" *) reg signed [31:0] prod_buf_i [0:FFT_SIZE-1];
+(* ram_style = "block" *) reg signed [31:0] prod_buf_q [0:FFT_SIZE-1];
 
 // BRAM read data (registered outputs from port blocks)
 reg signed [15:0] sig_rdata_i, sig_rdata_q;
 reg signed [15:0] ref_rdata_i, ref_rdata_q;
-reg signed [15:0] prod_rdata_i, prod_rdata_q;
+reg signed [31:0] prod_rdata_i, prod_rdata_q;
+
+// 32→16 saturating truncation for FWD-FFT capture into sig_buf/ref_buf and
+// for the final range_profile emission from the 32-bit IFFT output.
+function signed [15:0] sat_to_16;
+    input signed [31:0] val;
+    begin
+        if (val > 32'sd32767)
+            sat_to_16 = 16'sh7FFF;
+        else if (val < -32'sd32768)
+            sat_to_16 = 16'sh8000;
+        else
+            sat_to_16 = val[15:0];
+    end
+endfunction
 
 // ============================================================================
 // COUNTERS
@@ -153,11 +171,16 @@ reg out_primed;    // 1 = BRAM rdata valid for output reads
 // ============================================================================
 // FFT ENGINE INTERFACE (single instance, reused 3 times)
 // ============================================================================
+// PR-O.7: bridge widened to DATA_W=32. FWD passes sign-extend 16-bit ADC/ref
+// into 32-bit din; the IFFT pass feeds the 32-bit Q30 conjugate-mult product
+// directly. The bridge's 32-bit dout_re/im is sat-truncated to 16-bit before
+// sig_buf/ref_buf for FWD captures, and at the chain's range_profile output
+// for the IFFT capture.
 reg fft_start;
 reg fft_inverse;
-reg signed [15:0] fft_din_re, fft_din_im;
+reg signed [31:0] fft_din_re, fft_din_im;
 reg fft_din_valid;
-wire signed [15:0] fft_dout_re, fft_dout_im;
+wire signed [31:0] fft_dout_re, fft_dout_im;
 wire fft_dout_valid;
 wire fft_busy;
 wire fft_done;
@@ -172,7 +195,7 @@ wire fft_done;
 fft_engine_axi_bridge #(
     .N(FFT_SIZE),
     .LOG2N(ADDR_BITS),
-    .DATA_W(16),
+    .DATA_W(32),
     .INTERNAL_W(32),
     .TWIDDLE_W(16),
     .TWIDDLE_FILE("fft_twiddle_2048.mem")
@@ -194,10 +217,12 @@ fft_engine_axi_bridge #(
 // ============================================================================
 // CONJUGATE MULTIPLY INTERFACE (frequency_matched_filter)
 // ============================================================================
+// PR-O.7: conj-mult output widened to 32-bit Q30; the IFFT consumes it
+// directly without re-truncation. Driven from sig_buf/ref_buf (16-bit Q15).
 reg signed [15:0] mf_sig_re, mf_sig_im;
 reg signed [15:0] mf_ref_re, mf_ref_im;
 reg mf_valid_in;
-wire signed [15:0] mf_out_re, mf_out_im;
+wire signed [31:0] mf_out_re, mf_out_im;
 wire mf_valid_out;
 
 frequency_matched_filter mf_inst (
@@ -269,20 +294,22 @@ always @(posedge clk) begin : sig_bram_port
             else
                 addr = 0; // don't care, past last sample
         end
-        // Capture FFT output (write) — happens after feeding is done
+        // Capture FFT output (write) — sat-truncate 32→16 (FWD inputs are
+        // 16-bit ADC, /N-scaled output bins fit in 16-bit; saturation guards
+        // any pathological saturated tone case).
         if (fft_dout_valid && cap_count < FFT_SIZE) begin
             we      = 1'b1;
             addr    = cap_count[ADDR_BITS-1:0];
-            wdata_i = fft_dout_re;
-            wdata_q = fft_dout_im;
+            wdata_i = sat_to_16(fft_dout_re);
+            wdata_q = sat_to_16(fft_dout_im);
         end
     end
     ST_SIG_CAP: begin
         if (fft_dout_valid && cap_count < FFT_SIZE) begin
             we      = 1'b1;
             addr    = cap_count[ADDR_BITS-1:0];
-            wdata_i = fft_dout_re;
-            wdata_q = fft_dout_im;
+            wdata_i = sat_to_16(fft_dout_re);
+            wdata_q = sat_to_16(fft_dout_im);
         end
     end
     ST_MULTIPLY: begin
@@ -354,20 +381,20 @@ always @(posedge clk) begin : ref_bram_port
             else
                 addr = 0;
         end
-        // Capture FFT output
+        // Capture FFT output — sat-truncate 32→16 (see ST_SIG_FFT comment).
         if (fft_dout_valid && cap_count < FFT_SIZE) begin
             we      = 1'b1;
             addr    = cap_count[ADDR_BITS-1:0];
-            wdata_i = fft_dout_re;
-            wdata_q = fft_dout_im;
+            wdata_i = sat_to_16(fft_dout_re);
+            wdata_q = sat_to_16(fft_dout_im);
         end
     end
     ST_REF_CAP: begin
         if (fft_dout_valid && cap_count < FFT_SIZE) begin
             we      = 1'b1;
             addr    = cap_count[ADDR_BITS-1:0];
-            wdata_i = fft_dout_re;
-            wdata_q = fft_dout_im;
+            wdata_i = sat_to_16(fft_dout_re);
+            wdata_q = sat_to_16(fft_dout_im);
         end
     end
     ST_MULTIPLY: begin
@@ -405,7 +432,7 @@ end
 always @(posedge clk) begin : prod_bram_port
     reg                    we;
     reg  [ADDR_BITS-1:0]   addr;
-    reg  signed [15:0]     wdata_i, wdata_q;
+    reg  signed [31:0]     wdata_i, wdata_q;
 
     // Defaults
     we      = 1'b0;
@@ -415,7 +442,7 @@ always @(posedge clk) begin : prod_bram_port
 
     case (state)
     ST_MULTIPLY: begin
-        // Capture conjugate multiply output
+        // Capture conjugate multiply output — full 32-bit Q30 (PR-O.7).
         if (mf_valid_out && cap_count < FFT_SIZE) begin
             we      = 1'b1;
             addr    = cap_count[ADDR_BITS-1:0];
@@ -432,7 +459,8 @@ always @(posedge clk) begin : prod_bram_port
             else
                 addr = 0;
         end
-        // Capture IFFT output
+        // Capture IFFT output — 32-bit. Saturation to 16-bit happens at the
+        // chain output (out_i_reg/out_q_reg), not here.
         if (fft_dout_valid && cap_count < FFT_SIZE) begin
             we      = 1'b1;
             addr    = cap_count[ADDR_BITS-1:0];
@@ -551,7 +579,8 @@ always @(posedge clk or negedge reset_n) begin
         // data available in sig_rdata_i/q next cycle.
         // ================================================================
         ST_SIG_FFT: begin
-            // Feed phase: read sig_buf -> fft_din
+            // Feed phase: read sig_buf -> fft_din. sig_buf is 16-bit;
+            // sign-extend to the bridge's 32-bit din.
             if (feed_count < FFT_SIZE) begin
                 if (!feed_primed) begin
                     // Pre-read cycle: address presented to BRAM, wait 1 cycle
@@ -560,15 +589,15 @@ always @(posedge clk or negedge reset_n) begin
                     // fft_din_valid stays 0 (default)
                 end else begin
                     // Primed: BRAM rdata is valid for previous address
-                    fft_din_re    <= sig_rdata_i;
-                    fft_din_im    <= sig_rdata_q;
+                    fft_din_re    <= {{16{sig_rdata_i[15]}}, sig_rdata_i};
+                    fft_din_im    <= {{16{sig_rdata_q[15]}}, sig_rdata_q};
                     fft_din_valid <= 1'b1;
                     feed_count    <= feed_count + 1;
                 end
             end else if (feed_count == FFT_SIZE && feed_primed) begin
                 // Last sample: BRAM rdata has data for address 1023
-                fft_din_re    <= sig_rdata_i;
-                fft_din_im    <= sig_rdata_q;
+                fft_din_re    <= {{16{sig_rdata_i[15]}}, sig_rdata_i};
+                fft_din_im    <= {{16{sig_rdata_q[15]}}, sig_rdata_q};
                 fft_din_valid <= 1'b1;
                 feed_count    <= feed_count + 1; // -> 1025, stops feeding
             end
@@ -604,20 +633,21 @@ always @(posedge clk or negedge reset_n) begin
         // REF_FFT: Feed reference buffer to FFT engine (forward)
         // ================================================================
         ST_REF_FFT: begin
-            // Feed phase: read ref_buf -> fft_din
+            // Feed phase: read ref_buf -> fft_din. ref_buf is 16-bit;
+            // sign-extend to the bridge's 32-bit din.
             if (feed_count < FFT_SIZE) begin
                 if (!feed_primed) begin
                     feed_primed <= 1'b1;
                     feed_count  <= feed_count + 1;
                 end else begin
-                    fft_din_re    <= ref_rdata_i;
-                    fft_din_im    <= ref_rdata_q;
+                    fft_din_re    <= {{16{ref_rdata_i[15]}}, ref_rdata_i};
+                    fft_din_im    <= {{16{ref_rdata_q[15]}}, ref_rdata_q};
                     fft_din_valid <= 1'b1;
                     feed_count    <= feed_count + 1;
                 end
             end else if (feed_count == FFT_SIZE && feed_primed) begin
-                fft_din_re    <= ref_rdata_i;
-                fft_din_im    <= ref_rdata_q;
+                fft_din_re    <= {{16{ref_rdata_i[15]}}, ref_rdata_i};
+                fft_din_im    <= {{16{ref_rdata_q[15]}}, ref_rdata_q};
                 fft_din_valid <= 1'b1;
                 feed_count    <= feed_count + 1;
             end
@@ -748,15 +778,15 @@ always @(posedge clk or negedge reset_n) begin
                     out_primed <= 1'b1;
                     out_count  <= out_count + 1;
                 end else begin
-                    out_i_reg     <= prod_rdata_i;
-                    out_q_reg     <= prod_rdata_q;
+                    out_i_reg     <= sat_to_16(prod_rdata_i);
+                    out_q_reg     <= sat_to_16(prod_rdata_q);
                     out_valid_reg <= 1'b1;
                     out_count     <= out_count + 1;
                 end
             end else if (out_count == FFT_SIZE && out_primed) begin
                 // Last sample
-                out_i_reg     <= prod_rdata_i;
-                out_q_reg     <= prod_rdata_q;
+                out_i_reg     <= sat_to_16(prod_rdata_i);
+                out_q_reg     <= sat_to_16(prod_rdata_q);
                 out_valid_reg <= 1'b1;
                 out_count     <= out_count + 1;
             end else begin

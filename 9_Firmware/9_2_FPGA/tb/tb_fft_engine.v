@@ -243,26 +243,30 @@ initial begin
 
     run_fft(0);  // Forward FFT
 
-    // All bins should have re ~= 1000, im ~= 0
+    // AUDIT-C10/C-8: scaled-mode FFT now applies /N per direction. For an
+    // impulse of amplitude 1000, every bin = 1000/N. With N=16 → 62 (or 63
+    // after convergent rounding). Old expectation was 1000 (unscaled DFT).
     max_err = 0;
     for (i = 0; i < N; i = i + 1) begin
-        err = out_re[i] - 1000;
+        err = out_re[i] - (1000 / N);
         if (err < 0) err = -err;
         if (err > max_err) max_err = err;
         err = out_im[i];
         if (err < 0) err = -err;
         if (err > max_err) max_err = err;
     end
-    $display("  Impulse FFT max error from expected: %0d", max_err);
-    check(max_err < 10, "Impulse FFT: all bins ~= input amplitude");
-    check(out_re[0] == 1000 || (out_re[0] >= 998 && out_re[0] <= 1002), 
-          "Impulse FFT: bin 0 real ~= 1000");
+    $display("  Impulse FFT max error from expected (%0d): %0d",
+             1000 / N, max_err);
+    check(max_err < 4, "Impulse FFT: all bins ~= input amplitude / N");
+    check(out_re[0] >= ((1000/N) - 2) && out_re[0] <= ((1000/N) + 2),
+          "Impulse FFT: bin 0 real ~= 1000/N");
 
     // ================================================================
     // TEST GROUP 2: DC Input
     // FFT of constant value A across all N samples:
-    //   bin 0 = A*N, all other bins = 0
-    // Use amplitude 100 so bin 0 = 100*32 = 3200
+    //   bin 0 = A*N (textbook DFT). With AUDIT-C10/C-8 scaled-mode /N,
+    //   bin 0 = A. All other bins = 0.
+    // Use amplitude 100 so bin 0 = 100.
     // ================================================================
     $display("");
     $display("--- Test Group 2: DC Input ---");
@@ -274,10 +278,10 @@ initial begin
 
     run_fft(0);
 
-    $display("  DC FFT bin[0] = %0d + j%0d (expect %0d + j0)", out_re[0], out_im[0], 100*N);
-    // Q15 twiddle rounding over N butterflies can cause ~1% error
-    check(out_re[0] >= (100*N - 50) && out_re[0] <= (100*N + 50),
-          "DC FFT: bin 0 real ~= A*N (1.5% tol)");
+    $display("  DC FFT bin[0] = %0d + j%0d (expect %0d + j0)", out_re[0], out_im[0], 100);
+    // Q15 twiddle rounding over N butterflies can cause a few LSBs of error
+    check(out_re[0] >= 98 && out_re[0] <= 102,
+          "DC FFT: bin 0 real ~= A (scaled-mode /N)");
     
     max_err = 0;
     for (i = 1; i < N; i = i + 1) begin
@@ -293,7 +297,8 @@ initial begin
     // ================================================================
     // TEST GROUP 3: Single Tone (cosine at bin 4)
     // cos(2*pi*4*n/N) -> peaks at bins 4 and N-4 (=12 for N=16)
-    // Amplitude 1000 -> each peak = 1000*N/2 (=8000 for N=16)
+    // Amplitude 1000. Textbook DFT peak = 1000*N/2 = 8000 for N=16. With
+    // AUDIT-C10/C-8 scaled-mode /N, peak = 1000/2 = 500.
     // ================================================================
     $display("");
     $display("--- Test Group 3: Single Tone (bin 4) ---");
@@ -323,18 +328,22 @@ initial begin
     $display("  Tone FFT bin[%0d]   = %0d + j%0d", N-4, out_re[N-4], out_im[N-4]);
     check(max_mag_bin == 4 || max_mag_bin == (N-4),
           "Tone FFT: peak at bin 4 or N-4");
-    // Bin 4 and N-4 should have magnitude ~= N/2 * 1000 (=8000 for N=16)
+    // Scaled-mode /N: peak ~= 1000/2 = 500. Magnitude² target = 500² = 250000.
+    // Allow ±50 tolerance on amplitude (~10%) for Q15 twiddle quantization.
     mag = out_re[4] * out_re[4] + out_im[4] * out_im[4];
-    check(mag > ((N*1000/2 - 1000) * (N*1000/2 - 1000)) &&
-          mag < ((N*1000/2 + 1000) * (N*1000/2 + 1000)),
-          "Tone FFT: bin 4 magnitude ~= N/2 * 1000");
+    check(mag > ((1000/2 - 50) * (1000/2 - 50)) &&
+          mag < ((1000/2 + 50) * (1000/2 + 50)),
+          "Tone FFT: bin 4 magnitude ~= 1000/2 (scaled-mode /N)");
 
     // ================================================================
-    // TEST GROUP 4: Roundtrip (FFT then IFFT = identity)
-    // Load random-ish data, FFT, IFFT, compare to original
+    // TEST GROUP 4: Roundtrip (FFT then IFFT)
+    // AUDIT-C10/C-8: with scaled-mode /N on both directions, FFT(x)→IFFT
+    // gives x/N (not identity). Compare recovered to original/N.
+    // Round-trip is exact identity only if exactly one of FWD/INV scales —
+    // we picked symmetric scaling for sim/silicon parity, so /N residual.
     // ================================================================
     $display("");
-    $display("--- Test Group 4: Roundtrip (FFT->IFFT) ---");
+    $display("--- Test Group 4: Roundtrip (FFT->IFFT, expect /N) ---");
 
     // Use a simple deterministic pattern
     for (i = 0; i < N; i = i + 1) begin
@@ -366,25 +375,25 @@ initial begin
     // Now in_re/in_im has FFT output. Run IFFT.
     run_fft(1);
 
-    // out_re/out_im should match original (out2_re/out2_im) within tolerance
+    // out_re/out_im should match original/N within tolerance
     max_err = 0;
     for (i = 0; i < N; i = i + 1) begin
-        err = out_re[i] - out2_re[i];
+        err = out_re[i] - (out2_re[i] / N);
         if (err < 0) err = -err;
         if (err > max_err) max_err = err;
-        err = out_im[i] - out2_im[i];
+        err = out_im[i] - (out2_im[i] / N);
         if (err < 0) err = -err;
         if (err > max_err) max_err = err;
     end
-    $display("  Roundtrip max error: %0d", max_err);
-    check(max_err < 20, "Roundtrip: FFT->IFFT recovers original (err < 20)");
-    check(max_err < 5, "Roundtrip: FFT->IFFT tight tolerance (err < 5)");
+    $display("  Roundtrip max error vs original/N: %0d", max_err);
+    check(max_err < 5, "Roundtrip: FFT->IFFT recovers original/N (err < 5)");
+    check(max_err < 3, "Roundtrip: FFT->IFFT tight tolerance (err < 3)");
 
     // Print first few samples for debugging
-    $display("  Sample comparison (idx: original vs recovered):");
+    $display("  Sample comparison (idx: original/N vs recovered):");
     for (i = 0; i < 8; i = i + 1) begin
         $display("    [%0d] re: %0d vs %0d, im: %0d vs %0d",
-                 i, out2_re[i], out_re[i], out2_im[i], out_im[i]);
+                 i, out2_re[i] / N, out_re[i], out2_im[i] / N, out_im[i]);
     end
 
     // ================================================================
@@ -417,11 +426,13 @@ initial begin
 
     // ================================================================
     // TEST GROUP 6: Parseval's theorem (energy conservation)
-    // Sum |x[n]|^2 should equal (1/N) * Sum |X[k]|^2
-    // We compare N * sum_time vs sum_freq
+    // AUDIT-C10/C-8: with scaled-mode /N FWD FFT, X_scaled = X/N.
+    //   sum |X_scaled[k]|^2 = (1/N^2) * sum |X[k]|^2 = (1/N^2) * N * E_t
+    //                       = E_t / N
+    // So: N * E_freq = E_t (inverse of the textbook unscaled-DFT relation).
     // ================================================================
     $display("");
-    $display("--- Test Group 6: Parseval's Theorem ---");
+    $display("--- Test Group 6: Parseval's Theorem (scaled-mode) ---");
 
     for (i = 0; i < N; i = i + 1) begin
         in_re[i] = (i * 137 + 42) % 2001 - 1000;
@@ -442,18 +453,16 @@ initial begin
         total_energy_out = total_energy_out + out_re[i] * out_re[i] + out_im[i] * out_im[i];
     end
 
-    // Parseval: sum_time = (1/N) * sum_freq => N * sum_time = sum_freq
-    $display("  Time energy * N = %0d", total_energy_in * N);
-    $display("  Freq energy     = %0d", total_energy_out);
-    // Allow some tolerance for fixed-point rounding
-    err = total_energy_in * N - total_energy_out;
+    // Parseval (scaled): E_t = N * E_freq
+    $display("  Time energy        = %0d", total_energy_in);
+    $display("  Freq energy * N    = %0d", total_energy_out * N);
+    err = total_energy_in - total_energy_out * N;
     if (err < 0) err = -err;
-    $display("  Parseval error  = %0d", err);
-    // Relative error
-    if (total_energy_in * N > 0) begin
-        $display("  Parseval rel error = %0d%%", (err * 100) / (total_energy_in * N));
-        check((err * 100) / (total_energy_in * N) < 5, 
-              "Parseval: energy conserved within 5%");
+    $display("  Parseval error     = %0d", err);
+    if (total_energy_in > 0) begin
+        $display("  Parseval rel error = %0d%%", (err * 100) / total_energy_in);
+        check((err * 100) / total_energy_in < 5,
+              "Parseval (scaled): E_t == N*E_freq within 5%");
     end
 
     // ================================================================

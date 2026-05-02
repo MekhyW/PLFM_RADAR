@@ -3,11 +3,20 @@
 #
 # Produces ip/xfft_2048/xfft_2048.xci configured for the matched-filter chain:
 #   - Transform Length: 2048
-#   - Architecture:     Pipelined Streaming I/O
+#   - Architecture:     Pipelined Streaming I/O (Radix-2, 11 stages)
 #   - Data Format:      Fixed Point
-#   - Scaling:          Block Floating Point (run-time auto-scale)
+#   - Scaling:          Scaled (fixed schedule via cfg_tdata SCALE_SCH bits)
+#                       Schedule [1,1,1,1,1,1,1,1,1,1,1] = /N (unitary FFT).
+#                       AUDIT-C10/C-8 resolution: BFP previously hid a per-frame
+#                       block exponent the bridge dropped, making sim/silicon
+#                       absolute magnitudes incomparable. Scaled mode locks a
+#                       deterministic /N scaling matched in fft_engine.v fallback.
 #   - Rounding:         Convergent (round-to-even)
-#   - Input Width:      16-bit per real/imag (matches DDC output, DATA_W in chain)
+#   - Input Width:      32-bit per real/imag (PR-O.7 widening — chain feeds
+#                       Q30 conjugate-mult product into IFFT without
+#                       Q30→Q15 truncation; FWD passes sign-extend their
+#                       16-bit ADC/ref samples to 32-bit. AXIS data tdata
+#                       is 64-bit packed {Q[31:0], I[31:0]}.)
 #   - Phase Width:      16-bit
 #   - Output Ordering:  Natural Order
 #   - Throttle Scheme:  Non Real Time (allows downstream backpressure)
@@ -44,9 +53,9 @@ set_property -dict [list \
     CONFIG.implementation_options    {pipelined_streaming_io}     \
     CONFIG.channels                  {1}                          \
     CONFIG.data_format               {fixed_point}                \
-    CONFIG.scaling_options           {block_floating_point}       \
+    CONFIG.scaling_options           {scaled}                     \
     CONFIG.rounding_modes            {convergent_rounding}        \
-    CONFIG.input_width               {16}                         \
+    CONFIG.input_width               {32}                         \
     CONFIG.phase_factor_width        {16}                         \
     CONFIG.output_ordering           {natural_order}              \
     CONFIG.cyclic_prefix_insertion   {false}                      \

@@ -19,12 +19,24 @@
 // Latency: replaces fft_engine's ~150-180K-cycle iterative compute with the
 // LogiCORE Pipelined Streaming ~N + ~150-cycle pipeline. Functional behavior
 // is identical from the chain's view.
+//
+// AUDIT-C10/C-8: cfg_tdata carries SCALE_SCH+FWD/INV in scaled mode (24 bits).
+// Schedule = `RP_FFT_SCALE_SCH (radar_params.vh) = >>1 per stage = total /N.
+// Both the LogiCORE path and the iverilog fft_engine fallback honor the same
+// schedule, so absolute output magnitudes match between sim and silicon.
+//
+// PR-O.7 (2026-05-02): bridge widened to DATA_W=32 default and AXIS-data
+// 64-bit packed {Q[31:0], I[31:0]}. The matched-filter chain feeds the
+// frequency_matched_filter Q30 product directly into the IFFT instead of
+// truncating to Q15; xfft_2048 / xfft_2048_ip / fft_engine all carry 32-bit
+// I and Q now. See project_mf_chain_dynrange_defect_2026-05-02 in memory.
 // ============================================================================
+`include "radar_params.vh"
 
 module fft_engine_axi_bridge #(
     parameter N            = 2048,
     parameter LOG2N        = 11,
-    parameter DATA_W       = 16,
+    parameter DATA_W       = 32,
     parameter INTERNAL_W   = 32,
     parameter TWIDDLE_W    = 16,
     parameter TWIDDLE_FILE = "fft_twiddle_2048.mem"
@@ -49,30 +61,31 @@ module fft_engine_axi_bridge #(
 // ============================================================================
 // AXI-Stream signals to/from xfft_2048
 // ============================================================================
-reg  [7:0]  cfg_tdata;
-reg         cfg_tvalid;
-wire        cfg_tready;
+localparam AXIS_W = 2 * DATA_W;   // 64 when DATA_W=32
 
-reg  [31:0] axi_din_tdata;
-reg         axi_din_tvalid;
-reg         axi_din_tlast;
-wire        axi_din_tready;
+reg  [`RP_FFT_CFG_TDATA_W-1:0] cfg_tdata;   // 24 bits: {pad, SCALE_SCH, FWD/INV}
+reg                            cfg_tvalid;
+wire                           cfg_tready;
 
-wire [31:0] axi_dout_tdata;
-wire [7:0]  axi_dout_tuser;
-wire        axi_dout_tvalid;
-wire        axi_dout_tlast;
+reg  [AXIS_W-1:0] axi_din_tdata;
+reg               axi_din_tvalid;
+reg               axi_din_tlast;
+wire              axi_din_tready;
+
+wire [AXIS_W-1:0] axi_dout_tdata;
+wire              axi_dout_tvalid;
+wire              axi_dout_tlast;
 
 // 1-deep skid buffer absorbs LogiCORE FFT v9.1 nonrealtime backpressure
 // (PG109: tready may dip briefly during pipeline / BFP normalization events).
 // Upstream matched_filter_processing_chain has no flow-control input, so the
 // bridge cannot push back — must buffer. Sustained 2+ cycle backpressure sets
 // overflow_sticky for debug visibility.
-reg  [31:0]      skid_data;
-reg              skid_valid;
-reg              skid_last;
-reg  [LOG2N:0]   accept_count;     // beats actually accepted by IP (tvalid&&tready)
-reg              overflow_sticky;  // sticky: skid+active both full when upstream pushed
+reg  [AXIS_W-1:0] skid_data;
+reg               skid_valid;
+reg               skid_last;
+reg  [LOG2N:0]    accept_count;     // beats actually accepted by IP (tvalid&&tready)
+reg               overflow_sticky;  // sticky: skid+active both full when upstream pushed
 
 // xfft_2048 wrapper. AXI master always-accept (no backpressure modeling here).
 xfft_2048 u_xfft (
@@ -86,15 +99,14 @@ xfft_2048 u_xfft (
     .s_axis_data_tlast    (axi_din_tlast),
     .s_axis_data_tready   (axi_din_tready),
     .m_axis_data_tdata    (axi_dout_tdata),
-    .m_axis_data_tuser    (axi_dout_tuser),
     .m_axis_data_tvalid   (axi_dout_tvalid),
     .m_axis_data_tlast    (axi_dout_tlast),
     .m_axis_data_tready   (1'b1)
 );
 
-// Output mapping: AXI {Q,I} 32-bit → fft_engine-style separate re/im
-assign dout_re    = $signed(axi_dout_tdata[15:0]);
-assign dout_im    = $signed(axi_dout_tdata[31:16]);
+// Output mapping: AXI {Q,I} packed → fft_engine-style separate re/im
+assign dout_re    = $signed(axi_dout_tdata[DATA_W-1:0]);
+assign dout_im    = $signed(axi_dout_tdata[AXIS_W-1:DATA_W]);
 assign dout_valid = axi_dout_tvalid;
 
 // ============================================================================
@@ -117,16 +129,16 @@ reg [LOG2N:0]            in_count;       // counts inputs accepted into the IP
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         state           <= S_IDLE;
-        cfg_tdata       <= 8'd0;
+        cfg_tdata       <= {`RP_FFT_CFG_TDATA_W{1'b0}};
         cfg_tvalid      <= 1'b0;
-        axi_din_tdata   <= 32'd0;
+        axi_din_tdata   <= {AXIS_W{1'b0}};
         axi_din_tvalid  <= 1'b0;
         axi_din_tlast   <= 1'b0;
         in_count        <= 0;
         inverse_latched <= 1'b0;
         busy            <= 1'b0;
         done            <= 1'b0;
-        skid_data       <= 32'd0;
+        skid_data       <= {AXIS_W{1'b0}};
         skid_valid      <= 1'b0;
         skid_last       <= 1'b0;
         accept_count    <= 0;
@@ -143,7 +155,8 @@ always @(posedge clk or negedge reset_n) begin
             skid_valid     <= 1'b0;
             if (start) begin
                 inverse_latched <= inverse;
-                cfg_tdata       <= {7'd0, ~inverse};   // tdata[0]=1 → FWD
+                // {pad[0], SCALE_SCH[21:0], FWD/INV[0]}; ~inverse so FWD=1.
+                cfg_tdata       <= {1'b0, `RP_FFT_SCALE_SCH, ~inverse};
                 cfg_tvalid      <= 1'b1;
                 in_count        <= 0;
                 accept_count    <= 0;

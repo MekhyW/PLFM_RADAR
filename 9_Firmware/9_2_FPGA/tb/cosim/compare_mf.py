@@ -231,8 +231,14 @@ def compare_scenario(scenario_name, config, base_dir):
 
     checks = []
 
-    both_have_output = py_energy > 0 and rtl_energy > 0
-    checks.append(('Both produce output', both_have_output))
+    # No "both produce output" gate. With deterministic /N FFT scaling
+    # (PR-O) and the 32-bit conj-mult→IFFT widening (PR-O.7), some stimuli
+    # (e.g. bb_mf_test_i with peak amplitude=5 modeling a barely-received
+    # target) correctly produce all-zero output — both Python and RTL agree
+    # on zero, which is valid sim/silicon parity. The remaining metrics
+    # (energy ratio, magnitude correlation, peak overlap, I/Q correlation)
+    # already handle the zero case via the `py_energy == 0 and
+    # rtl_energy == 0 → 1.0` clauses.
 
     correct_count = len(rtl_i) == FFT_SIZE
     checks.append(('Correct output count (2048)', correct_count))

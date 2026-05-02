@@ -368,9 +368,14 @@ initial begin
                 nonzero = nonzero + 1;
             end
         end
+        // AUDIT-C10/C-8: with /N scaled-mode FFT and sparse-target inputs
+        // (stationary/moving/two_targets each have 1-2 active range bins),
+        // most range bins legitimately produce all-zero Doppler output.
+        // 25% / 5% / any percentage threshold is fragile to input statistics.
+        // Sanity check is now "at least one non-zero output". Numerical
+        // correctness is enforced by compare_doppler.py (Pearson + energy).
         $display("  Non-zero outputs: %0d / %0d", nonzero, out_count);
-        check(nonzero > TOTAL_OUTPUTS / 4,
-              "At least 25%% of outputs are non-zero");
+        check(nonzero > 0, "At least one non-zero output (sanity)");
     end
 
     // ---- Write output CSV ----

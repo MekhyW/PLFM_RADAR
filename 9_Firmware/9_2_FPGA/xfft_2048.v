@@ -7,7 +7,8 @@
 // (PG109). Two implementation branches selected by `FFT_USE_XILINX_IP`:
 //
 //   `define FFT_USE_XILINX_IP  → instantiates xfft_2048_ip (LogiCORE FFT v9.1)
-//                                 Pipelined Streaming I/O, BFP scaling, 16-bit.
+//                                 Pipelined Streaming I/O, scaled mode, 32-bit
+//                                 input/output (PR-O.7 widening).
 //                                 Use for: Vivado synth, remote XSim sim.
 //
 //   `undef  FFT_USE_XILINX_IP  → instantiates fft_engine batched one-shot
@@ -18,33 +19,45 @@
 // transform with full overlap → ~6600 cycles for 3 sequential transforms in
 // the matched-filter chain, vs the 16700-cycle PRI budget. Closes RX-NEW-3.
 //
-// Data format: {Q[15:0], I[15:0]} packed 32-bit on s_axis/m_axis_data_tdata.
-// Config tdata[0]: 1 = forward FFT, 0 = inverse FFT (matches PG109 convention).
+// Data format: {Q[31:0], I[31:0]} packed 64-bit on s_axis/m_axis_data_tdata.
+// PR-O.7 widened the path from 16- to 32-bit so the IFFT can consume the
+// frequency_matched_filter Q30 product directly without the BFP-era
+// >>15+saturate that crushed chirp/DC/impulse autocorrelations to zero under
+// deterministic /N scaling — see project_mf_chain_dynrange_defect_2026-05-02.
 //
-// Block-FP scaling (Xilinx path only): per-frame BLK_EXP returned via
-// m_axis_data_tuser[7:0] so chain-level normalization can rescale before
-// magnitude compute. Sim path always returns tuser = 0 (no BFP).
+// Config tdata layout (24-bit, scaled mode — see AUDIT-C10/C-8 in
+// radar_params.vh `RP_FFT_SCALE_SCH):
+//   bit  0     = FWD/INV   (1 = forward, 0 = inverse)
+//   bits[22:1] = SCALE_SCH (22 bits, fixed schedule from RP_FFT_SCALE_SCH)
+//   bit  23    = byte-align padding
+//
+// Scaled mode replaces the previous Block-Floating-Point setting. BFP returned
+// a per-frame BLK_EXP on m_axis_data_tuser that the bridge dropped — sim and
+// silicon disagreed on absolute magnitude per frame, breaking CFAR alpha
+// portability. Scaled with schedule `RP_FFT_SCALE_SCH = [1,1,…,1] gives
+// deterministic /N output, mirrored in fft_engine.v fallback.
 // ============================================================================
 
 module xfft_2048 (
     input  wire        aclk,
     input  wire        aresetn,
 
-    // Configuration channel (AXI-Stream slave). 8-bit tdata; only bit 0
-    // (FWD/INV) is decoded by the IP in BFP mode (no scale schedule).
-    input  wire [7:0]  s_axis_config_tdata,
+    // Configuration channel (AXI-Stream slave). 24-bit tdata carries
+    // {pad, SCALE_SCH[21:0], FWD/INV}.
+    input  wire [23:0] s_axis_config_tdata,
     input  wire        s_axis_config_tvalid,
     output wire        s_axis_config_tready,
 
-    // Data input channel (AXI-Stream slave)
-    input  wire [31:0] s_axis_data_tdata,
+    // Data input channel (AXI-Stream slave). 64-bit packed {Q[31:0], I[31:0]}.
+    input  wire [63:0] s_axis_data_tdata,
     input  wire        s_axis_data_tvalid,
     input  wire        s_axis_data_tlast,
     output wire        s_axis_data_tready,
 
-    // Data output channel (AXI-Stream master)
-    output wire [31:0] m_axis_data_tdata,
-    output wire [7:0]  m_axis_data_tuser,   // BLK_EXP[7:0] (Xilinx path); 0 (sim)
+    // Data output channel (AXI-Stream master). 64-bit packed {Q[31:0], I[31:0]}.
+    // No tuser — scaled mode does not emit BLK_EXP, and the design has no
+    // XK_INDEX / OVFLO consumers.
+    output wire [63:0] m_axis_data_tdata,
     output wire        m_axis_data_tvalid,
     output wire        m_axis_data_tlast,
     input  wire        m_axis_data_tready
@@ -59,6 +72,10 @@ module xfft_2048 (
 
 wire [7:0] xfft_status_tdata;
 wire       xfft_status_tvalid;
+// tuser still exists on the IP port surface (Vivado emits a 1-bit dummy in
+// scaled mode with no XK_INDEX/OVFLO). Wired to a local sink so the placer
+// elides it.
+wire [7:0] xfft_dout_tuser_unused;
 
 xfft_2048_ip u_xfft (
     .aclk                        (aclk),
@@ -70,7 +87,7 @@ xfft_2048_ip u_xfft (
     .s_axis_data_tready          (s_axis_data_tready),
     .s_axis_data_tlast           (s_axis_data_tlast),
     .m_axis_data_tdata           (m_axis_data_tdata),
-    .m_axis_data_tuser           (m_axis_data_tuser),
+    .m_axis_data_tuser           (xfft_dout_tuser_unused),
     .m_axis_data_tvalid          (m_axis_data_tvalid),
     .m_axis_data_tready          (m_axis_data_tready),
     .m_axis_data_tlast           (m_axis_data_tlast),
@@ -106,10 +123,10 @@ localparam [2:0] S_IDLE   = 3'd0,
 reg [2:0] state;
 reg       inverse_reg;
 
-(* ram_style = "block" *) reg signed [15:0] in_buf_re  [0:N-1];
-(* ram_style = "block" *) reg signed [15:0] in_buf_im  [0:N-1];
-(* ram_style = "block" *) reg signed [15:0] out_buf_re [0:N-1];
-(* ram_style = "block" *) reg signed [15:0] out_buf_im [0:N-1];
+(* ram_style = "block" *) reg signed [31:0] in_buf_re  [0:N-1];
+(* ram_style = "block" *) reg signed [31:0] in_buf_im  [0:N-1];
+(* ram_style = "block" *) reg signed [31:0] out_buf_re [0:N-1];
+(* ram_style = "block" *) reg signed [31:0] out_buf_im [0:N-1];
 
 reg [CNT_W-1:0] in_count;
 reg [CNT_W-1:0] feed_count;
@@ -118,25 +135,25 @@ reg [CNT_W-1:0] out_count;
 
 reg                fft_start;
 reg                fft_inverse;
-reg signed [15:0]  fft_din_re, fft_din_im;
+reg signed [31:0]  fft_din_re, fft_din_im;
 reg                fft_din_valid;
-wire signed [15:0] fft_dout_re, fft_dout_im;
+wire signed [31:0] fft_dout_re, fft_dout_im;
 wire               fft_dout_valid;
 wire               fft_busy;
 wire               fft_done;
 
 reg                in_buf_we;
 reg [LOG2N-1:0]    in_buf_waddr;
-reg signed [15:0]  in_buf_wdata_re, in_buf_wdata_im;
+reg signed [31:0]  in_buf_wdata_re, in_buf_wdata_im;
 reg                out_buf_we;
 reg [LOG2N-1:0]    out_buf_waddr;
-reg signed [15:0]  out_buf_wdata_re, out_buf_wdata_im;
+reg signed [31:0]  out_buf_wdata_re, out_buf_wdata_im;
 
-reg signed [15:0]  out_rd_re, out_rd_im;
+reg signed [31:0]  out_rd_re, out_rd_im;
 reg                out_rd_valid;
 
 fft_engine #(
-    .N(N), .LOG2N(LOG2N), .DATA_W(16), .INTERNAL_W(32),
+    .N(N), .LOG2N(LOG2N), .DATA_W(32), .INTERNAL_W(32),
     .TWIDDLE_W(16), .TWIDDLE_FILE("fft_twiddle_2048.mem")
 ) fft_core (
     .clk(aclk), .reset_n(aresetn),
@@ -149,7 +166,6 @@ fft_engine #(
 assign s_axis_config_tready = (state == S_IDLE);
 assign s_axis_data_tready   = (state == S_FEED) && (in_count < N);
 assign m_axis_data_tdata    = {out_rd_im, out_rd_re};
-assign m_axis_data_tuser    = 8'h00;  // No BFP in fallback path
 assign m_axis_data_tvalid   = out_rd_valid;
 assign m_axis_data_tlast    = out_rd_valid && (out_count == N);
 
@@ -212,8 +228,8 @@ always @(posedge aclk or negedge aresetn) begin
                 if (s_axis_data_tvalid) begin
                     in_buf_we       <= 1'b1;
                     in_buf_waddr    <= in_count[LOG2N-1:0];
-                    in_buf_wdata_re <= s_axis_data_tdata[15:0];
-                    in_buf_wdata_im <= s_axis_data_tdata[31:16];
+                    in_buf_wdata_re <= s_axis_data_tdata[31:0];
+                    in_buf_wdata_im <= s_axis_data_tdata[63:32];
                     in_count        <= in_count + 1;
                 end
             end else begin

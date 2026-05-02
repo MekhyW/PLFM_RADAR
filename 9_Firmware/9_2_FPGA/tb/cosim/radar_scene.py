@@ -653,6 +653,23 @@ def generate_all_test_vectors(output_dir=None):
         Target(range_m=1500, velocity_mps=20, rcs_dbsm=5),
     ]
     bb_i, bb_q = generate_baseband_samples(bb_targets, FFT_SIZE, noise_stddev=1.0)
+    # AGC: cosim feeds bb_mf_test directly into the matched filter and bypasses
+    # rx_gain_control.v. Apply the scaling rx_gain_control would have applied
+    # in production — bring the per-frame peak up to ~½ ADC full-scale (16384)
+    # so the FFT chain operates in its dynamic-range sweet spot. Without this,
+    # the bare radar-physics amplitudes (~5 LSB at the modeled ranges) sit
+    # below the /N FFT noise floor and the matched-filter chain correctly but
+    # uselessly produces all-zero output (see project_mf_chain_dynrange_defect_
+    # 2026-05-02 / PR-O.7). The other AGC-relevant paths
+    # (radar_receiver_final → rx_gain_control → matched_filter_multi_segment)
+    # are exercised by tb_rx_gain_control + the system integration TBs.
+    BB_MF_AGC_TARGET_PEAK = 16384
+    peak = max(max((abs(v) for v in bb_i), default=0),
+               max((abs(v) for v in bb_q), default=0))
+    if peak > 0:
+        scale = BB_MF_AGC_TARGET_PEAK / peak
+        bb_i = [max(-32768, min(32767, round(v * scale))) for v in bb_i]
+        bb_q = [max(-32768, min(32767, round(v * scale))) for v in bb_q]
     write_hex_file(os.path.join(output_dir, "bb_mf_test_i.hex"), bb_i, bits=16)
     write_hex_file(os.path.join(output_dir, "bb_mf_test_q.hex"), bb_q, bits=16)
 

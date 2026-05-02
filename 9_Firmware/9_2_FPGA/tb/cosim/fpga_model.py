@@ -764,6 +764,16 @@ def _twiddle_lookup(k, n, cos_rom):
     return sign_extend((-cos_rom[n2 - k]) & 0xFFFF, 16), cos_rom[k - n4]
 
 
+def _conv_round_shift1(val: int) -> int:
+    """Convergent-rounding (round-half-to-even) divide by 2.
+
+    Mirrors fft_engine.v conv_round_shift1(): adds 1 to the >>>1 result iff
+    both bit0 and bit1 of the input are set. Identical sim/silicon behavior
+    when the LogiCORE FFT v9.1 is set to convergent_rounding mode.
+    """
+    return (val + ((val >> 1) & val & 1)) >> 1
+
+
 class FFTEngine:
     """
     Bit-accurate model of fft_engine.v
@@ -772,7 +782,11 @@ class FFTEngine:
     Internal: 32-bit signed working data.
     Twiddle: 16-bit Q15 from quarter-wave cosine ROM.
     Butterfly: multiply 32x16->49 bits, >>>15, add/subtract.
-    Output: saturate 32->16 bits. IFFT also >>>LOG2N before saturate.
+
+    AUDIT-C10/C-8 (2026-05-01): per-stage convergent-rounding >>>1 added at
+    every BF_WRITE to mirror LogiCORE FFT v9.1 scaled-mode schedule
+    [1,1,…,1] = total /N. FWD and INV both apply /N → output is the
+    textbook unitary FFT.
     """
 
     def __init__(self, n=2048, twiddle_file=None):
@@ -792,26 +806,31 @@ class FFTEngine:
             val >>= 1
         return result
 
-    def compute(self, in_re, in_im, inverse=False):
+    def compute(self, in_re, in_im, inverse=False, data_width=16):
         """
         Run full FFT or IFFT.
 
         Args:
-            in_re: list of N signed 16-bit real inputs
-            in_im: list of N signed 16-bit imag inputs
+            in_re: list of N signed real inputs (data_width bits)
+            in_im: list of N signed imag inputs (data_width bits)
             inverse: True for IFFT
+            data_width: input/output width matching iverilog fft_engine.v
+                DATA_W (16 or 32). 32 is used by MatchedFilterChain since
+                PR-O.7 to carry the conjugate-mult Q30 product into the
+                IFFT without truncation.
 
         Returns:
-            (out_re, out_im): lists of N signed 16-bit outputs
+            (out_re, out_im): lists of N signed integers, data_width bits.
         """
         n = self.N
         log2n = self.LOG2N
+        mask = (1 << data_width) - 1
 
-        # LOAD: sign-extend 16->32 and store at bit-reversed addresses
+        # LOAD: sign-extend to INTERNAL_W (32) and store at bit-reversed addr
         for i in range(n):
             br = self._bit_reverse(i, log2n)
-            self.mem_re[br] = sign_extend(in_re[i] & 0xFFFF, 16)
-            self.mem_im[br] = sign_extend(in_im[i] & 0xFFFF, 16)
+            self.mem_re[br] = sign_extend(in_re[i] & mask, data_width)
+            self.mem_im[br] = sign_extend(in_im[i] & mask, data_width)
 
         # COMPUTE: LOG2N stages of butterflies
         for stage in range(log2n):
@@ -846,26 +865,26 @@ class FFTEngine:
                 t_re = prod_re >> 15
                 t_im = prod_im >> 15
 
-                # Add/subtract
-                self.mem_re[even] = a_re + t_re
-                self.mem_im[even] = a_im + t_im
-                self.mem_re[odd] = a_re - t_re
-                self.mem_im[odd] = a_im - t_im
+                # Add/subtract, then per-stage convergent-rounding >>>1 to match
+                # LogiCORE FFT v9.1 scaled-mode schedule [1,…,1] (AUDIT-C10/C-8).
+                # Same in FWD and INV — see fft_engine.v conv_round_shift1().
+                sum_re = a_re + t_re
+                sum_im = a_im + t_im
+                dif_re = a_re - t_re
+                dif_im = a_im - t_im
+                self.mem_re[even] = _conv_round_shift1(sum_re)
+                self.mem_im[even] = _conv_round_shift1(sum_im)
+                self.mem_re[odd]  = _conv_round_shift1(dif_re)
+                self.mem_im[odd]  = _conv_round_shift1(dif_im)
 
-        # OUTPUT: read in linear order, saturate to 16 bits
+        # OUTPUT: read in linear order, saturate to data_width bits.
+        # /N has already been applied across LOG2N stages; no extra >>>LOG2N
+        # for IFFT.
         out_re = []
         out_im = []
         for i in range(n):
-            re_val = self.mem_re[i]
-            im_val = self.mem_im[i]
-
-            if inverse:
-                # IFFT: >>>LOG2N before saturate
-                re_val = re_val >> log2n
-                im_val = im_val >> log2n
-
-            out_re.append(saturate(re_val, 16))
-            out_im.append(saturate(im_val, 16))
+            out_re.append(saturate(self.mem_re[i], data_width))
+            out_im.append(saturate(self.mem_im[i], data_width))
 
         return out_re, out_im
 
@@ -876,17 +895,19 @@ class FFTEngine:
 
 class FreqMatchedFilter:
     """
-    Bit-accurate model of frequency_matched_filter.v
+    Bit-accurate model of frequency_matched_filter.v.
 
     Conjugate multiply: (a + jb) * conj(c + jd) = (ac+bd) + j(bc-ad)
 
-    4-stage pipeline:
-      P1: Register inputs
+    PR-O.7 (2026-05-02): output widened to full 32-bit Q30. The matched-
+    filter chain feeds the Q30 product directly into the IFFT instead of
+    truncating to Q15 — see project_mf_chain_dynrange_defect_2026-05-02.
+
+    Pipeline:
+      P1: Register inputs (16-bit Q15)
       P2: Four 16x16 multiplies -> 32-bit products
       P3: Add: real_sum = ac + bd, imag_sum = bc - ad (32-bit Q30)
-      P4: Round (+ 1<<14), saturate, extract [30:15] -> 16-bit Q15
-
-    For batch processing, we compute all samples directly.
+      P4: Pass Q30 through (no >>15+saturate)
     """
 
     @staticmethod
@@ -894,36 +915,25 @@ class FreqMatchedFilter:
         """
         Compute one conjugate multiply with exact RTL arithmetic.
 
-        Returns (out_re, out_im) as signed 16-bit.
+        Returns (out_re, out_im) as signed 32-bit Q30.
         """
         a = sign_extend(sig_re & 0xFFFF, 16)
         b = sign_extend(sig_im & 0xFFFF, 16)
         c = sign_extend(ref_re & 0xFFFF, 16)
         d = sign_extend(ref_im & 0xFFFF, 16)
 
-        # Stage 2: 16x16 multiplies -> 32-bit signed
+        # 16x16 multiplies -> 32-bit signed (Q30 when inputs are Q15)
         ac = a * c
         bd = b * d
         bc = b * c
         ad = a * d
 
-        # Stage 3: accumulate (Q30)
+        # Accumulate (Q30, 32-bit container — exact, no rounding/saturate)
         real_sum = ac + bd
         imag_sum = bc - ad
 
-        # Stage 4: round + saturate + extract [30:15]
-        def round_sat_extract(q30_val):
-            rounded = q30_val + (1 << 14)
-            # Saturation check
-            if rounded > 0x3FFF8000:
-                return 0x7FFF
-            if rounded < -0x3FFF8000:
-                return sign_extend(0x8000, 16)
-            return sign_extend((rounded >> 15) & 0xFFFF, 16)
-
-        out_re = round_sat_extract(real_sum)
-        out_im = round_sat_extract(imag_sum)
-        return out_re, out_im
+        return sign_extend(real_sum & 0xFFFFFFFF, 32), \
+               sign_extend(imag_sum & 0xFFFFFFFF, 32)
 
     @staticmethod
     def process_block(sig_re, sig_im, ref_re, ref_im):
@@ -946,7 +956,16 @@ class FreqMatchedFilter:
 
 class MatchedFilterChain:
     """
-    Complete matched filter: FFT(signal) * conj(FFT(ref)) -> IFFT
+    Complete matched filter: FFT(signal) * conj(FFT(ref)) -> IFFT.
+
+    Mirrors matched_filter_processing_chain.v exactly. PR-O.7 (2026-05-02)
+    widened the path between conj-mult and IFFT to 32-bit Q30 — the chain's
+    bridge runs DATA_W=32, FWD passes sign-extend their 16-bit ADC/ref
+    inputs, FWD outputs sat-truncate back to 16-bit before sig_buf/ref_buf,
+    the conj-mult emits Q30 directly, and the IFFT consumes 32-bit input
+    + emits 32-bit output. The chain saturates the IFFT output to 16-bit
+    on the way to range_profile_*. See project_mf_chain_dynrange_defect_
+    2026-05-02 for the BFP-era origin of the dynamic-range issue.
 
     Uses a single FFTEngine instance (as in RTL, engine is reused).
     """
@@ -965,21 +984,32 @@ class MatchedFilterChain:
             ref_re/im: reference chirp I/Q (16-bit signed, fft_size samples)
 
         Returns:
-            (range_profile_re, range_profile_im): fft_size x 16-bit signed
+            (range_profile_re, range_profile_im): fft_size x 16-bit signed.
         """
-        # Forward FFT of signal
-        sig_fft_re, sig_fft_im = self.fft.compute(sig_re, sig_im, inverse=False)
+        # Forward FFT of signal — bridge feeds sign-extended 32-bit input;
+        # output sat-truncated back to 16-bit for sig_buf storage.
+        sig_fft_re, sig_fft_im = self.fft.compute(
+            sig_re, sig_im, inverse=False, data_width=32)
+        sig_fft_re = [saturate(v, 16) for v in sig_fft_re]
+        sig_fft_im = [saturate(v, 16) for v in sig_fft_im]
 
         # Forward FFT of reference (same engine, reused)
-        ref_fft_re, ref_fft_im = self.fft.compute(ref_re, ref_im, inverse=False)
+        ref_fft_re, ref_fft_im = self.fft.compute(
+            ref_re, ref_im, inverse=False, data_width=32)
+        ref_fft_re = [saturate(v, 16) for v in ref_fft_re]
+        ref_fft_im = [saturate(v, 16) for v in ref_fft_im]
 
-        # Conjugate multiply
+        # Conjugate multiply — full 32-bit Q30 product (PR-O.7).
         prod_re, prod_im = self.conj_mult.process_block(
             sig_fft_re, sig_fft_im, ref_fft_re, ref_fft_im
         )
 
-        # Inverse FFT
-        range_re, range_im = self.fft.compute(prod_re, prod_im, inverse=True)
+        # Inverse FFT — consumes the 32-bit Q30 product directly. Output is
+        # 32-bit; saturate to 16-bit at the chain output boundary.
+        range_re, range_im = self.fft.compute(
+            prod_re, prod_im, inverse=True, data_width=32)
+        range_re = [saturate(v, 16) for v in range_re]
+        range_im = [saturate(v, 16) for v in range_im]
 
         return range_re, range_im
 

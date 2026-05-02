@@ -45,7 +45,8 @@
 module tb_fft_engine_axi_bridge;
     localparam N        = 2048;
     localparam LOG2N    = 11;
-    localparam DATA_W   = 16;
+    localparam DATA_W   = 32;            // PR-O.7: bridge default
+    localparam AXIS_W   = 2 * DATA_W;
     localparam CLK_PER  = 10.0;          // 100 MHz
 
     reg                        clk = 1'b0;
@@ -63,9 +64,9 @@ module tb_fft_engine_axi_bridge;
     wire                       busy;
     wire                       done;
 
-    reg [31:0] received [0:N-1];
-    reg        received_last [0:N-1];
-    integer    beats_received;
+    reg [AXIS_W-1:0] received [0:N-1];
+    reg              received_last [0:N-1];
+    integer          beats_received;
 
     // Backpressure pattern (driven by parallel always block based on selectors)
     reg        tb_tready_value = 1'b1;
@@ -142,7 +143,7 @@ module tb_fft_engine_axi_bridge;
             pattern_id      = 0;
             beats_received  = 0;
             for (i = 0; i < N; i = i + 1) begin
-                received[i]      = 32'h0;
+                received[i]      = {AXIS_W{1'b0}};
                 received_last[i] = 1'b0;
             end
             @(posedge clk); @(posedge clk);
@@ -228,10 +229,10 @@ module tb_fft_engine_axi_bridge;
                                      test_id, k, received[k][DATA_W-1:0], k);
                         errors = errors + 1;
                     end
-                    if (received[k][31:DATA_W] !== {DATA_W{1'b0}}) begin
+                    if (received[k][AXIS_W-1:DATA_W] !== {DATA_W{1'b0}}) begin
                         if (errors < 5)
                             $display("[FAIL] Test %0d: beat %0d: im=%0d (expected 0)",
-                                     test_id, k, received[k][31:DATA_W]);
+                                     test_id, k, received[k][AXIS_W-1:DATA_W]);
                         errors = errors + 1;
                     end
                     if (k == N - 1) begin
@@ -318,19 +319,21 @@ endmodule
 
 // ============================================================================
 // Stub xfft_2048 — replaces the production wrapper for this TB.
+// AUDIT-C10/C-8: cfg_tdata is 24-bit in scaled mode; tuser dropped with BFP.
+// PR-O.7: AXIS data widened to 64-bit packed {Q[31:0], I[31:0]} so the IFFT
+// can carry the conjugate-mult Q30 product end-to-end.
 // ============================================================================
 module xfft_2048 (
     input  wire        aclk,
     input  wire        aresetn,
-    input  wire [7:0]  s_axis_config_tdata,
+    input  wire [23:0] s_axis_config_tdata,
     input  wire        s_axis_config_tvalid,
     output wire        s_axis_config_tready,
-    input  wire [31:0] s_axis_data_tdata,
+    input  wire [63:0] s_axis_data_tdata,
     input  wire        s_axis_data_tvalid,
     input  wire        s_axis_data_tlast,
     output wire        s_axis_data_tready,
-    output wire [31:0] m_axis_data_tdata,
-    output wire [7:0]  m_axis_data_tuser,
+    output wire [63:0] m_axis_data_tdata,
     output wire        m_axis_data_tvalid,
     output wire        m_axis_data_tlast,
     input  wire        m_axis_data_tready
@@ -339,8 +342,7 @@ module xfft_2048 (
     assign s_axis_config_tready = 1'b1;
     assign s_axis_data_tready   = tb_fft_engine_axi_bridge.tb_tready_value;
 
-    assign m_axis_data_tdata    = 32'd0;
-    assign m_axis_data_tuser    = 8'd0;
+    assign m_axis_data_tdata    = 64'd0;
     assign m_axis_data_tvalid   = 1'b0;
     assign m_axis_data_tlast    = 1'b0;
 

@@ -78,13 +78,15 @@ def nco_reference(num_samples: int, ftw: int, fs: float = 400e6,
 def fft_reference(in_re, in_im, n: int = 2048, inverse: bool = False):
     """Ideal floating-point FFT.
 
-    Scaling matches the RTL convention:
-      forward: y[k] = sum_n x[n] * exp(-j*2*pi*k*n/N)            (no 1/N)
+    Scaling matches the AUDIT-C10/C-8 RTL convention (LogiCORE FFT v9.1
+    scaled mode + iverilog fft_engine.v with per-stage convergent >>>1):
+      forward: y[k] = (1/N) * sum_n x[n] * exp(-j*2*pi*k*n/N)    (1/N applied)
       inverse: y[n] = (1/N) * sum_k X[k] * exp(+j*2*pi*k*n/N)    (1/N applied)
 
-    The RTL fft_engine implements >>>LOG2N before output saturation when
-    inverse=1, which is the same 1/N. numpy.fft.ifft already includes the
-    1/N factor, so we use it directly with no rescaling.
+    Both directions apply the SCALE_SCH = [1,1,…,1] schedule (one >>>1 per
+    radix-2 stage = total /N), making FWD and INV symmetric. numpy.fft.ifft
+    already includes the 1/N for INV; for FWD we divide explicitly so this
+    reference exactly matches the RTL output.
 
     Args:
         in_re/in_im: length-N int or float sequences
@@ -99,7 +101,10 @@ def fft_reference(in_re, in_im, n: int = 2048, inverse: bool = False):
     if len(re) != n or len(im) != n:
         raise ValueError(f"input length {len(re)} != N={n}")
     x = re + 1j * im
-    y = np.fft.ifft(x) if inverse else np.fft.fft(x)
+    if inverse:
+        y = np.fft.ifft(x)
+    else:
+        y = np.fft.fft(x) / n
     return y.real.copy(), y.imag.copy()
 
 
@@ -129,8 +134,11 @@ def matched_filter_reference(sig_re, sig_im, ref_re, ref_im, fft_size: int = 204
     ref_im = np.asarray(ref_im, dtype=np.float64)
     s = sig_re + 1j * sig_im
     r = ref_re + 1j * ref_im
-    S = np.fft.fft(s, n=fft_size)
-    R = np.fft.fft(r, n=fft_size)
+    # AUDIT-C10/C-8: forward FFTs are scaled /N to mirror the RTL scaled-mode
+    # schedule [1,…,1]; the IFFT is also /N (numpy default). Total chain
+    # downscale = /N², predictable and matched between sim and silicon.
+    S = np.fft.fft(s, n=fft_size) / fft_size
+    R = np.fft.fft(r, n=fft_size) / fft_size
     P = S * np.conj(R)
     p = np.fft.ifft(P)
     return p.real.copy(), p.imag.copy()
@@ -196,7 +204,10 @@ def doppler_reference(chirp_data_i, chirp_data_q,
             x_im = chirp_data_q[start:stop, rbin] * win / 32768.0
             x = x_re + 1j * x_im
 
-            X = np.fft.fft(x)
+            # AUDIT-C10/C-8: xfft_16 wraps fft_engine.v which now applies the
+            # /N (=/16) scaled-mode schedule per radix-2 stage. Mirror that
+            # downscale in the reference so the cosim compares apples-to-apples.
+            X = np.fft.fft(x) / chirps_per_subframe
             out_re[rbin, offset:offset + chirps_per_subframe] = X.real
             out_im[rbin, offset:offset + chirps_per_subframe] = X.imag
 
@@ -215,12 +226,14 @@ def _self_test():
     assert abs(cos_q15[0] - 32767.0) < 1.0, f"NCO[0].cos = {cos_q15[0]}"
     assert abs(sin_q15[0]) < 1.0, f"NCO[0].sin = {sin_q15[0]}"
 
-    # FFT: impulse -> all bins = amplitude
+    # FFT: impulse -> all bins = amplitude/N (scaled-mode schedule)
     in_re = [1000] + [0] * 15
     in_im = [0] * 16
     out_re, out_im = fft_reference(in_re, in_im, n=16)
     for k in range(16):
-        assert abs(out_re[k] - 1000.0) < 1e-9, f"FFT impulse bin {k}: {out_re[k]}"
+        # AUDIT-C10/C-8: FWD FFT now applies /N (=/16), so each bin = 1000/16
+        assert abs(out_re[k] - 1000.0 / 16.0) < 1e-9, \
+            f"FFT impulse bin {k}: {out_re[k]}"
 
     # Doppler: zero input -> zero output
     z_i = np.zeros((48, 512))

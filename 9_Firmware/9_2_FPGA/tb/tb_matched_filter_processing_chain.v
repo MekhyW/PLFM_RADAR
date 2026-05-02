@@ -452,8 +452,17 @@ module tb_matched_filter_processing_chain;
 
         // ════════════════════════════════════════════════════════
         // TEST GROUP 9: Signal vs different reference
-        // Signal at bin 5, reference at bin 10 → peak NOT at bin 0
+        // Signal at bin 5, reference at bin 10 → orthogonal tones, expect ~0
         // ════════════════════════════════════════════════════════
+        // Two pure complex exponentials at integer bins are perfectly
+        // orthogonal under DFT — FFT(sig)·conj(FFT(ref)) is exactly 0 at
+        // every bin, IFFT of zero is zero. The previous "non-zero output"
+        // assertion only passed under BFP because BFP renormalized the
+        // quantization-noise floor up to fill 16-bit; with deterministic
+        // /N scaling (PR-O), the noise stays at LSB and the orthogonal
+        // case correctly produces all-zero output. Keep the mechanics
+        // checks (sample count, IDLE return) and assert the real
+        // mathematical behavior.
         $display("\n--- Test Group 9: Mismatched Signal vs Reference ---");
         apply_reset;
 
@@ -474,7 +483,9 @@ module tb_matched_filter_processing_chain;
 
         $display("  Mismatched: peak at bin %0d, magnitude %0d", cap_peak_bin, cap_max_abs);
         check(cap_count == FFT_SIZE, "Got 2048 output samples");
-        check(cap_max_abs > 0, "Non-zero output for non-zero input");
+        // Orthogonal tones → cross-correlation is theoretically zero. Allow
+        // a small (<=4) margin for rounding/quantization in the FFT path.
+        check(cap_max_abs <= 4, "Orthogonal tones cross-correlation ~0");
 
         // ════════════════════════════════════════════════════════
         // TEST GROUP 10: Golden Reference — DC Autocorrelation (Case 1)

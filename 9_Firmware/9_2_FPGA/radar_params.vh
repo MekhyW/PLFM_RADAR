@@ -82,6 +82,32 @@
 `define RP_NUM_DOPPLER_BINS     48      // 3 sub-frames * 16 bins = 48 (PR-F)
 `define RP_DATA_WIDTH           16      // ADC/processing data width
 
+// ----------------------------------------------------------------------------
+// FFT SCALE SCHEDULE (AUDIT-C10 / C-8 resolution)
+// ----------------------------------------------------------------------------
+// LogiCORE FFT v9.1 Pipelined Streaming I/O is Radix-2 with LOG2N=11 stages.
+// Scale schedule width = 2*LOG2N = 22 bits (PG109). Each pair of bits selects
+// the per-stage right-shift: 2'b00=>>0, 2'b01=>>1, 2'b10=>>2, 2'b11=>>3.
+//
+// Schedule [1,1,1,1,1,1,1,1,1,1,1] = >>1 at every stage = total >>11 = /N.
+// This makes both FWD and INV outputs the textbook unitary DFT (FWD = X[k]/N,
+// INV = x[n] when its input is the true DFT). End-to-end matched filter
+// chain output (FFT·conj(FFT)·IFFT) is /N², predictable and per-frame
+// constant, so CFAR alpha calibrated in iverilog matches silicon counts.
+//
+// cfg_tdata layout per PG109 (1 channel, no CP, fixed NFFT, scaled):
+//   bit  0       = FWD/INV (1 = forward, 0 = inverse)
+//   bits[22:1]   = SCALE_SCH (22 bits)
+//   bit  23      = byte-align padding (0)
+// Total cfg_tdata width = 24 bits.
+//
+// The same schedule is replicated in fft_engine.v (iverilog fallback) by
+// applying convergent-rounding >>>1 at every BF_WRITE stage so absolute
+// counts agree between sim and silicon.
+`define RP_FFT_CFG_TDATA_W      24
+`define RP_FFT_SCALE_SCH_W      22
+`define RP_FFT_SCALE_SCH        22'h155555  // [01,01,01,01,01,01,01,01,01,01,01]
+
 // 3-ladder waveform identity (replaces 1-bit use_long_chirp rail in PR-C onward)
 // `define RP_WAVE_<NAME> values are 2-bit waveform selectors carried on
 // `wave_sel[1:0]` at every chirp boundary. RESERVED is a hard error.

@@ -21,6 +21,8 @@
 //     SNR check that's been used elsewhere in this codebase)
 // ============================================================================
 
+`include "radar_params.vh"
+
 module tb_xfft_2048_xsim;
 
     localparam CLK_PERIOD = 10.0;       // 100 MHz
@@ -30,17 +32,19 @@ module tb_xfft_2048_xsim;
     reg         aclk      = 0;
     reg         aresetn   = 0;
 
-    reg  [7:0]  cfg_tdata;
+    // AUDIT-C10/C-8: cfg_tdata widened to 24 bits (scaled mode SCALE_SCH+FWD/INV).
+    // PR-O.7: data AXIS widened to 64-bit packed {Q[31:0], I[31:0]} —
+    // matches the regenerated xfft_2048_ip with input_width=32.
+    reg  [23:0] cfg_tdata;
     reg         cfg_tvalid;
     wire        cfg_tready;
 
-    reg  [31:0] din_tdata;
+    reg  [63:0] din_tdata;
     reg         din_tvalid;
     reg         din_tlast;
     wire        din_tready;
 
-    wire [31:0] dout_tdata;
-    wire [7:0]  dout_tuser;
+    wire [63:0] dout_tdata;
     wire        dout_tvalid;
     wire        dout_tlast;
     reg         dout_tready;
@@ -58,9 +62,9 @@ module tb_xfft_2048_xsim;
     integer this_mag;
     integer cur_re, cur_im;
 
-    // Capture the entire output frame
-    reg signed [15:0] out_re [0:N-1];
-    reg signed [15:0] out_im [0:N-1];
+    // Capture the entire output frame (32-bit per channel, PR-O.7)
+    reg signed [31:0] out_re [0:N-1];
+    reg signed [31:0] out_im [0:N-1];
     integer           out_collected;
 
     always #(CLK_PERIOD/2) aclk = ~aclk;
@@ -76,7 +80,6 @@ module tb_xfft_2048_xsim;
         .s_axis_data_tlast    (din_tlast),
         .s_axis_data_tready   (din_tready),
         .m_axis_data_tdata    (dout_tdata),
-        .m_axis_data_tuser    (dout_tuser),
         .m_axis_data_tvalid   (dout_tvalid),
         .m_axis_data_tlast    (dout_tlast),
         .m_axis_data_tready   (dout_tready)
@@ -85,8 +88,8 @@ module tb_xfft_2048_xsim;
     // Continuously capture output frame
     always @(posedge aclk) begin
         if (aresetn && dout_tvalid && dout_tready && out_collected < N) begin
-            out_re[out_collected] <= $signed(dout_tdata[15:0]);
-            out_im[out_collected] <= $signed(dout_tdata[31:16]);
+            out_re[out_collected] <= $signed(dout_tdata[31:0]);
+            out_im[out_collected] <= $signed(dout_tdata[63:32]);
             out_collected         <= out_collected + 1;
         end
     end
@@ -98,7 +101,8 @@ module tb_xfft_2048_xsim;
         input fwd;
         begin
             @(posedge aclk);
-            cfg_tdata  <= {7'b0, fwd};
+            // {pad[0], SCALE_SCH[21:0], FWD/INV[0]} — see radar_params.vh
+            cfg_tdata  <= {1'b0, `RP_FFT_SCALE_SCH, fwd};
             cfg_tvalid <= 1'b1;
             @(posedge aclk);
             while (!cfg_tready) @(posedge aclk);
@@ -130,7 +134,9 @@ module tb_xfft_2048_xsim;
                    end
                 default: begin re16 = 0; im16 = 0; end
                 endcase
-                din_tdata <= {im16[15:0], re16[15:0]};
+                // PR-O.7: AXIS data is now 64-bit packed {Q[31:0], I[31:0]}.
+                // Sign-extend the 16-bit stim to 32-bit for the wider input.
+                din_tdata <= {{16{im16[15]}}, im16[15:0], {16{re16[15]}}, re16[15:0]};
                 din_tlast <= (i == N-1);
                 @(posedge aclk);
                 while (!din_tready) @(posedge aclk);
@@ -225,8 +231,8 @@ module tb_xfft_2048_xsim;
         stream_frame(0);
         wait_frame(20000);
         analyze_frame(peak_bin, peak_mag, mean_others);
-        $display("  peak_bin=%0d peak_mag=%0d mean_others=%0d tuser=0x%h",
-                 peak_bin, peak_mag, mean_others, dout_tuser);
+        $display("  peak_bin=%0d peak_mag=%0d mean_others=%0d",
+                 peak_bin, peak_mag, mean_others);
         check(peak_bin == 0,                  "DC -> peak at bin 0");
         check(peak_mag > 8 * mean_others + 1, "DC -> peak/mean > 8x");
 
@@ -238,8 +244,8 @@ module tb_xfft_2048_xsim;
         stream_frame(1);
         wait_frame(20000);
         analyze_frame(peak_bin, peak_mag, mean_others);
-        $display("  peak_bin=%0d peak_mag=%0d mean_others=%0d tuser=0x%h",
-                 peak_bin, peak_mag, mean_others, dout_tuser);
+        $display("  peak_bin=%0d peak_mag=%0d mean_others=%0d",
+                 peak_bin, peak_mag, mean_others);
         // For an impulse at sample 0, |X[k]| is constant; peak/mean ratio
         // close to 1. Allow up to 3x to account for bit-width quantization.
         check(peak_mag < 3 * mean_others + 100,
@@ -253,8 +259,8 @@ module tb_xfft_2048_xsim;
         stream_frame(2);
         wait_frame(20000);
         analyze_frame(peak_bin, peak_mag, mean_others);
-        $display("  peak_bin=%0d peak_mag=%0d mean_others=%0d tuser=0x%h",
-                 peak_bin, peak_mag, mean_others, dout_tuser);
+        $display("  peak_bin=%0d peak_mag=%0d mean_others=%0d",
+                 peak_bin, peak_mag, mean_others);
         check(peak_bin == 128,                "Tone -> peak at bin 128");
         check(peak_mag > 8 * mean_others + 1, "Tone -> peak/mean > 8x");
 

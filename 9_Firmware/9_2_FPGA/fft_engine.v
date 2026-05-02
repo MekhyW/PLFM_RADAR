@@ -15,7 +15,13 @@
  *              BF_MULT2: DSP multiply from registered data + twiddle → PREG
  *              BF_WRITE: Shift (bit-select from PREG, pure wiring) +
  *                        add/subtract + BRAM writeback
- *   - OUTPUT:  Stream N results (1/N scaling for IFFT)
+ *   - OUTPUT:  Stream N results
+ *
+ * Scaling: convergent-rounding >>>1 at every BF_WRITE stage (LOG2N stages = /N
+ * total), mirroring the LogiCORE FFT v9.1 `scaled` schedule
+ * `RP_FFT_SCALE_SCH = [1,1,…,1] in radar_params.vh. Both FWD and INV outputs
+ * are unitary (FWD = X[k]/N, INV = x[n]). See AUDIT-C10/C-8 in the audit
+ * memory for why BFP was replaced.
  *
  * Twiddle index computed via barrel shift (idx << (LOG2N-1-stage)) instead
  * of general multiply, since the stride is always a power of 2.
@@ -233,13 +239,41 @@ reg signed [PROD_W:0] bf_prod_re, bf_prod_im; // 49 bits to hold sum of two prod
 reg signed [INTERNAL_W-1:0] bf_sum_re, bf_sum_im;
 reg signed [INTERNAL_W-1:0] bf_dif_re, bf_dif_im;
 
+// AUDIT-C10/C-8: per-stage convergent-rounding >>>1 to match LogiCORE FFT v9.1
+// `scaled` mode with schedule [1,1,1,1,1,1,1,1,1,1,1] = `RP_FFT_SCALE_SCH.
+// Total downscale across LOG2N stages = /N → unitary FFT. Convergent rounding
+// (round-half-to-even): add 1 to the >>>1 result only when both LSBs are 1
+// — matches `rounding_modes=convergent_rounding` in xfft_2048_ip.xci so sim
+// and silicon agree on absolute counts within ~1 LSB tolerance.
+function signed [INTERNAL_W-1:0] conv_round_shift1;
+    input signed [INTERNAL_W-1:0] val;
+    reg               tie_break;
+    reg signed [1:0]  tie_signed;
+    begin
+        // Mixing unsigned width-extension with signed val turns the whole
+        // expression unsigned and silently demotes >>> to a logical shift —
+        // catastrophic for negative values. Build the +1 addend as a *signed*
+        // 2-bit value so the add stays signed and >>>1 is arithmetic.
+        tie_break  = val[0] & val[1];
+        tie_signed = {1'b0, tie_break};      // 2'sd0 or 2'sd1
+        conv_round_shift1 = (val + tie_signed) >>> 1;
+    end
+endfunction
+
+reg signed [INTERNAL_W-1:0] sum_re_pre, sum_im_pre, dif_re_pre, dif_im_pre;
 always @(*) begin : bf_addsub
     // Shift is pure bit-selection from DSP PREG (zero logic levels in HW).
-    // Path: PREG → wiring → 32-bit CARRY4 adder → BRAM write (~3 ns total).
-    bf_sum_re = rd_a_re + (bf_prod_re >>> (TWIDDLE_W - 1));
-    bf_sum_im = rd_a_im + (bf_prod_im >>> (TWIDDLE_W - 1));
-    bf_dif_re = rd_a_re - (bf_prod_re >>> (TWIDDLE_W - 1));
-    bf_dif_im = rd_a_im - (bf_prod_im >>> (TWIDDLE_W - 1));
+    // Path: PREG → wiring → 32-bit CARRY4 adder → convergent round/shift → BRAM
+    // write. The per-stage rounding shift is two CARRY4 levels (~5 ns), still
+    // inside the 10 ns budget at 100 MHz.
+    sum_re_pre = rd_a_re + (bf_prod_re >>> (TWIDDLE_W - 1));
+    sum_im_pre = rd_a_im + (bf_prod_im >>> (TWIDDLE_W - 1));
+    dif_re_pre = rd_a_re - (bf_prod_re >>> (TWIDDLE_W - 1));
+    dif_im_pre = rd_a_im - (bf_prod_im >>> (TWIDDLE_W - 1));
+    bf_sum_re  = conv_round_shift1(sum_re_pre);
+    bf_sum_im  = conv_round_shift1(sum_im_pre);
+    bf_dif_re  = conv_round_shift1(dif_re_pre);
+    bf_dif_im  = conv_round_shift1(dif_im_pre);
 end
 
 // ============================================================================
@@ -518,18 +552,14 @@ xpm_memory_tdpram #(
 // OUTPUT PIPELINE
 // ============================================================================
 reg out_pipe_valid;
-reg out_pipe_inverse;
 
 // Sync reset: pure internal pipeline — no functional need for async reset.
 // Enables downstream register absorption.
 always @(posedge clk) begin
-    if (!reset_n) begin
-        out_pipe_valid   <= 1'b0;
-        out_pipe_inverse <= 1'b0;
-    end else begin
-        out_pipe_valid   <= (state == ST_OUTPUT) && (out_count <= FFT_N_M1[LOG2N-1:0]);
-        out_pipe_inverse <= inverse;
-    end
+    if (!reset_n)
+        out_pipe_valid <= 1'b0;
+    else
+        out_pipe_valid <= (state == ST_OUTPUT) && (out_count <= FFT_N_M1[LOG2N-1:0]);
 end
 
 // ============================================================================
@@ -611,13 +641,12 @@ always @(posedge clk or negedge reset_n) begin
             end
 
             if (out_pipe_valid) begin
-                if (out_pipe_inverse) begin
-                    dout_re <= saturate(mem_rdata_a_re >>> LOG2N);
-                    dout_im <= saturate(mem_rdata_a_im >>> LOG2N);
-                end else begin
-                    dout_re <= saturate(mem_rdata_a_re);
-                    dout_im <= saturate(mem_rdata_a_im);
-                end
+                // Per-stage >>>1 (RP_FFT_SCALE_SCH) already applied total /N
+                // across LOG2N stages — both FWD and INV outputs are textbook
+                // unitary (FWD = X[k]/N, INV = x[n] for true-DFT input).
+                // No additional shift here.
+                dout_re    <= saturate(mem_rdata_a_re);
+                dout_im    <= saturate(mem_rdata_a_im);
                 dout_valid <= 1'b1;
             end
 
