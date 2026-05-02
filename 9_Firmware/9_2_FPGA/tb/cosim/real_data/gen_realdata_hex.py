@@ -8,12 +8,18 @@ Replaces the legacy ADI CN0566 hardware captures (32-chirp / 2-subframe /
 (48-chirp / 3-subframe / 48-bin Doppler) so the regression no longer
 depends on out-of-tree .npy files.
 
-Outputs (six files, all under tb/cosim/real_data/hex/):
-  doppler_input_realdata.hex      48 chirps x 512 range bins, packed {Q,I}
-  doppler_ref_i.hex / _q.hex      512 range bins x 48 Doppler bins (signed 16-bit)
-  fullchain_range_input.hex       48 chirps x 2048 range bins, packed {Q,I}
-  fullchain_doppler_ref_i.hex
-  fullchain_doppler_ref_q.hex     same shape as doppler_ref_*
+Outputs (all under tb/cosim/real_data/hex/):
+
+  RTL stimuli + goldens (.hex):
+    doppler_input_realdata.hex      48 chirps x 512 range bins, packed {Q,I}
+    doppler_ref_i.hex / _q.hex      512 range bins x 48 Doppler bins (signed 16-bit)
+    fullchain_range_input.hex       48 chirps x 2048 range bins, packed {Q,I}
+    fullchain_doppler_ref_i.hex
+    fullchain_doppler_ref_q.hex     same shape as doppler_ref_*
+
+  GUI replay intermediates (.npy, COSIM_DIR ReplayFormat in v7.replay):
+    decimated_range_i.npy / _q.npy  (48, 512) — post range_bin_decimator
+    doppler_map_i.npy    / _q.npy   (512, 48) — post doppler_processor
 
 Dimensions match production (radar_params.vh: RP_FFT_SIZE=2048,
 RP_DECIMATION_FACTOR=4, RP_NUM_RANGE_BINS=512, RP_NUM_DOPPLER_BINS=48).
@@ -28,6 +34,8 @@ Usage:  python3 gen_realdata_hex.py
 
 import os
 import sys
+
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -106,10 +114,11 @@ def gen_doppler_realdata():
         seed=SCENE_SEED,
     )
 
-    stim = []
-    for c in range(CHIRPS_PER_FRAME):
-        for rb in range(DOPPLER_RANGE_BINS):
-            stim.append((frame_i[c][rb], frame_q[c][rb]))
+    stim = [
+        (frame_i[c][rb], frame_q[c][rb])
+        for c in range(CHIRPS_PER_FRAME)
+        for rb in range(DOPPLER_RANGE_BINS)
+    ]
     write_hex_32(os.path.join(OUT_DIR, "doppler_input_realdata.hex"), stim)
 
     dp = make_doppler_processor()
@@ -118,7 +127,8 @@ def gen_doppler_realdata():
     write_hex_16(os.path.join(OUT_DIR, "doppler_ref_i.hex"), flat_i)
     write_hex_16(os.path.join(OUT_DIR, "doppler_ref_q.hex"), flat_q)
 
-    print(f"  stimulus: {len(stim)} packed lines (expected {CHIRPS_PER_FRAME * DOPPLER_RANGE_BINS})")
+    expected_stim = CHIRPS_PER_FRAME * DOPPLER_RANGE_BINS
+    print(f"  stimulus: {len(stim)} packed lines (expected {expected_stim})")
     print(f"  golden:   {len(flat_i)} lines i / {len(flat_q)} lines q "
           f"(expected {DOPPLER_RANGE_BINS * DOPPLER_TOTAL_BINS})")
 
@@ -133,10 +143,11 @@ def gen_fullchain_realdata():
         seed=SCENE_SEED,
     )
 
-    stim = []
-    for c in range(CHIRPS_PER_FRAME):
-        for rb in range(FULLCHAIN_INPUT_BINS):
-            stim.append((frame_i[c][rb], frame_q[c][rb]))
+    stim = [
+        (frame_i[c][rb], frame_q[c][rb])
+        for c in range(CHIRPS_PER_FRAME)
+        for rb in range(FULLCHAIN_INPUT_BINS)
+    ]
     write_hex_32(os.path.join(OUT_DIR, "fullchain_range_input.hex"), stim)
 
     # fpga_model.RangeBinDecimator is hard-coded to 2048->512, DECIM=4 — production.
@@ -152,6 +163,16 @@ def gen_fullchain_realdata():
     write_hex_16(os.path.join(OUT_DIR, "fullchain_doppler_ref_i.hex"), flat_i)
     write_hex_16(os.path.join(OUT_DIR, "fullchain_doppler_ref_q.hex"), flat_q)
 
+    # Same arrays serialized for v7.replay COSIM_DIR format (GUI replay).
+    np.save(os.path.join(OUT_DIR, "decimated_range_i.npy"),
+            np.asarray(decim_i_2d, dtype=np.int32))
+    np.save(os.path.join(OUT_DIR, "decimated_range_q.npy"),
+            np.asarray(decim_q_2d, dtype=np.int32))
+    np.save(os.path.join(OUT_DIR, "doppler_map_i.npy"),
+            np.asarray(doppler_i, dtype=np.int32))
+    np.save(os.path.join(OUT_DIR, "doppler_map_q.npy"),
+            np.asarray(doppler_q, dtype=np.int32))
+
     print(f"  stimulus: {len(stim)} packed lines "
           f"(expected {CHIRPS_PER_FRAME * FULLCHAIN_INPUT_BINS})")
     print(f"  golden:   {len(flat_i)} lines i / {len(flat_q)} lines q "
@@ -164,18 +185,30 @@ def main():
     gen_fullchain_realdata()
 
     print("\nGenerated files:")
-    for f in (
+    hex_files = (
         "doppler_input_realdata.hex",
         "doppler_ref_i.hex",
         "doppler_ref_q.hex",
         "fullchain_range_input.hex",
         "fullchain_doppler_ref_i.hex",
         "fullchain_doppler_ref_q.hex",
-    ):
+    )
+    for f in hex_files:
         path = os.path.join(OUT_DIR, f)
         with open(path) as fp:
             n_lines = sum(1 for _ in fp)
         print(f"  {f:40s}  {n_lines:7d} lines  ({os.path.getsize(path):7d} bytes)")
+
+    npy_files = (
+        "decimated_range_i.npy",
+        "decimated_range_q.npy",
+        "doppler_map_i.npy",
+        "doppler_map_q.npy",
+    )
+    for f in npy_files:
+        path = os.path.join(OUT_DIR, f)
+        arr = np.load(path)
+        print(f"  {f:40s}  shape={arr.shape!s:>12s}  ({os.path.getsize(path):7d} bytes)")
 
 
 if __name__ == '__main__':

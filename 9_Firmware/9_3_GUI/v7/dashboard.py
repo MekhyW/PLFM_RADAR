@@ -94,7 +94,7 @@ def _make_dspin() -> QDoubleSpinBox:
 # =============================================================================
 
 class RangeDopplerCanvas(FigureCanvasQTAgg):
-    """Matplotlib canvas showing the Range-Doppler map (NUM_RANGE_BINS x NUM_DOPPLER_BINS) with dark theme."""
+    """Matplotlib canvas showing the Range-Doppler map (NUM_RANGE_BINS x NUM_DOPPLER_BINS) with dark theme."""  # noqa: E501
 
     def __init__(self, _parent=None):
         fig = Figure(figsize=(10, 6), facecolor=DARK_BG)

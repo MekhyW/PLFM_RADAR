@@ -483,7 +483,7 @@ class TestWaveformConfig(unittest.TestCase):
         from v7.models import WaveformConfig
         wc = WaveformConfig()
         # MEDIUM has the largest per-subframe v_unamb (smallest PRI).
-        # K=6 default → ~266 m/s; well above UAS speeds 50–80 m/s.
+        # K=6 default -> ~266 m/s; well above UAS speeds 50-80 m/s.
         v6 = wc.extended_max_velocity_mps_crt()
         self.assertAlmostEqual(v6, wc.max_velocity_medium_mps * 6, places=2)
         # K=3 should give half of K=6.
@@ -669,7 +669,7 @@ class TestSoftwareFPGASignalChain(unittest.TestCase):
         from v7.software_fpga import SoftwareFPGA
         from radar_protocol import NUM_RANGE_BINS, NUM_DOPPLER_BINS
 
-        # Production dimensions: 48 chirps × 2048 samples.
+        # Production dimensions: 48 chirps x 2048 samples.
         iq_i = np.zeros((NUM_DOPPLER_BINS, 2048), dtype=np.int64)
         iq_q = np.zeros((NUM_DOPPLER_BINS, 2048), dtype=np.int64)
         # Inject a single strong tone in bin 10 of every chirp.
@@ -803,12 +803,12 @@ class TestReplayEngineCosim(unittest.TestCase):
         if not self._available():
             self.skipTest("co-sim data not found")
         from v7.replay import ReplayEngine
-        from radar_protocol import RadarFrame
+        from radar_protocol import RadarFrame, NUM_RANGE_BINS, NUM_DOPPLER_BINS
         engine = ReplayEngine(self.COSIM_DIR)
         frame = engine.get_frame(0)
         self.assertIsInstance(frame, RadarFrame)
-        self.assertEqual(frame.range_doppler_i.shape, (64, 32))
-        self.assertEqual(frame.magnitude.shape, (64, 32))
+        self.assertEqual(frame.range_doppler_i.shape, (NUM_RANGE_BINS, NUM_DOPPLER_BINS))
+        self.assertEqual(frame.magnitude.shape, (NUM_RANGE_BINS, NUM_DOPPLER_BINS))
 
     def test_get_frame_out_of_range(self):
         if not self._available():
@@ -849,7 +849,7 @@ class TestReplayEngineRawIQ(unittest.TestCase):
         from v7.software_fpga import SoftwareFPGA
         from radar_protocol import RadarFrame, NUM_RANGE_BINS, NUM_DOPPLER_BINS
 
-        # Production dimensions: 48 chirps × 2048 samples per frame.
+        # Production dimensions: 48 chirps x 2048 samples per frame.
         raw = (np.random.randn(2, NUM_DOPPLER_BINS, 2048)
                + 1j * np.random.randn(2, NUM_DOPPLER_BINS, 2048))
         with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as f:
@@ -1082,7 +1082,7 @@ class TestUnfoldVelocityCRT(unittest.TestCase):
         v_unamb, v_res = self._vu_vr()
         v_true = -75.0
         v_meas = [_fold_v(v_true, vu) for vu in v_unamb]
-        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
+        v_est, conf, _alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
         self.assertAlmostEqual(v_est, v_true, places=1)
         self.assertEqual(conf, "CONFIRMED")
 
@@ -1105,7 +1105,7 @@ class TestUnfoldVelocityCRT(unittest.TestCase):
         v_true = 25.0
         # SHORT + MEDIUM only (LONG dropped out, e.g. clutter).
         v_meas = [_fold_v(v_true, v_unamb[0]), _fold_v(v_true, v_unamb[1])]
-        v_est, conf, alias = unfold_velocity_crt(
+        v_est, conf, _alias = unfold_velocity_crt(
             v_meas, [v_unamb[0], v_unamb[1]], [v_res[0], v_res[1]],
         )
         self.assertAlmostEqual(v_est, v_true, places=1)
@@ -1117,7 +1117,7 @@ class TestUnfoldVelocityCRT(unittest.TestCase):
         v_unamb, v_res = self._vu_vr()
         # Random per-PRI values that do not correspond to any v_true.
         v_meas = [10.0, -30.0, 35.0]
-        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
+        v_est, conf, _alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
         self.assertEqual(conf, "AMBIGUOUS")
         self.assertAlmostEqual(v_est, 10.0, places=2)  # PRI-0 fallback
 
@@ -1130,7 +1130,7 @@ class TestUnfoldVelocityCRT(unittest.TestCase):
         # Pick v_true near the advertised CRT ceiling.
         v_true = wc.extended_max_velocity_mps_crt(max_alias_k=6) - 5.0  # ~261 m/s
         v_meas = [_fold_v(v_true, vu) for vu in v_unamb]
-        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res, max_alias_k=6)
+        v_est, conf, _alias = unfold_velocity_crt(v_meas, v_unamb, v_res, max_alias_k=6)
         self.assertAlmostEqual(v_est, v_true, places=0)  # within 1 m/s
         # Should still be CONFIRMED for a real velocity at this scale.
         self.assertIn(conf, ("CONFIRMED", "LIKELY"))

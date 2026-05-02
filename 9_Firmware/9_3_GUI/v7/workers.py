@@ -196,7 +196,11 @@ class RadarDataWorker(QThread):
         # for SHORT/MEDIUM sub-frame bins until PR-Q.5 replaces this path
         # with extract_targets_from_frame_crt.
         v_res = self._waveform.velocity_resolution_long_mps
-        n_doppler = frame.detections.shape[1] if frame.detections.ndim == 2 else self._waveform.n_doppler_bins
+        n_doppler = (
+            frame.detections.shape[1]
+            if frame.detections.ndim == 2
+            else self._waveform.n_doppler_bins
+        )
         doppler_center = n_doppler // 2
 
         for idx in det_indices:

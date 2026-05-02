@@ -573,7 +573,7 @@ def unfold_velocity_crt(
     alias depth k_0 ∈ [-K, K] generates candidates
     ``v_true = v_meas_0 + k_0 · 2 · v_unamb_0``.  A candidate is
     *valid* when it folds back into all other active PRIs to within
-    ``tol_factor × max(v_res)``.
+    ``tol_factor * max(v_res)``.
 
     Args:
         v_meas_per_sf: signed velocity measurement per active sub-frame
@@ -652,9 +652,7 @@ def unfold_velocity_crt(
         confidence = "AMBIGUOUS"
     elif n_sf == 3 and n_cands == 1:
         confidence = "CONFIRMED"
-    elif n_sf == 3 and n_cands == 2:
-        confidence = "LIKELY"
-    elif n_sf == 2 and n_cands == 1:
+    elif (n_sf == 3 and n_cands == 2) or (n_sf == 2 and n_cands == 1):
         confidence = "LIKELY"
     else:  # n_sf == 2 and n_cands == 2
         confidence = "AMBIGUOUS"

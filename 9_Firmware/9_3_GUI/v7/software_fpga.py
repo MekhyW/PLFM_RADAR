@@ -192,7 +192,11 @@ class SoftwareFPGA:
         #     to math-generated twiddles otherwise).
         range_i = np.zeros((n_chirps, n_samples), dtype=np.int64)
         range_q = np.zeros((n_chirps, n_samples), dtype=np.int64)
-        twiddle_path = TWIDDLE_2048 if (n_samples == 2048 and os.path.exists(TWIDDLE_2048)) else None
+        twiddle_path = (
+            TWIDDLE_2048
+            if (n_samples == 2048 and os.path.exists(TWIDDLE_2048))
+            else None
+        )
         for c in range(n_chirps):
             range_i[c], range_q[c] = run_range_fft(
                 iq_i[c].astype(np.int64),

@@ -55,3 +55,5 @@ select = [
 "test_*.py" = ["ARG", "T20", "ERA"]
 # Re-export modules: unused imports are intentional
 "v7/hardware.py" = ["F401"]
+# FPGA cosim scripts: CLI tools — print() is the intended output channel
+"9_Firmware/9_2_FPGA/tb/cosim/**.py" = ["T20"]

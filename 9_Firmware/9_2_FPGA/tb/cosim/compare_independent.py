@@ -38,14 +38,14 @@ from pathlib import Path
 # Required: numpy + scipy. If either is missing, exit code 2 with a [SKIP]
 # marker so the regression can distinguish missing-deps from real failures
 # (see run_regression.sh "Independent Reference Drift (T-6)" block).
+import importlib.util
+
 _MISSING = []
 try:
-    import numpy as np  # noqa: F401
+    import numpy as np
 except ImportError:
     _MISSING.append("numpy")
-try:
-    import scipy.signal.windows  # noqa: F401
-except ImportError:
+if importlib.util.find_spec("scipy.signal") is None:
     _MISSING.append("scipy")
 if _MISSING:
     print(
@@ -55,8 +55,6 @@ if _MISSING:
         "         or:           pip install numpy scipy"
     )
     sys.exit(2)
-
-import numpy as np  # re-import to get module binding now that we know it's there
 
 # Make local imports work when invoked from anywhere
 THIS_DIR = Path(__file__).resolve().parent
@@ -80,9 +78,9 @@ from fpga_model import (  # noqa: E402
 
 TOL_NCO_LUT_LSB        = 1     # NCO_SINE_LUT: tightest possible
 TOL_TWIDDLE_LSB        = 1     # twiddle ROMs: same — quarter-wave Q15 cosine
-TOL_WINDOW_LSB         = 4     # 4 LSB ≈ 1.2e-4 rounding budget on Q15 round
+TOL_WINDOW_LSB         = 4     # 4 LSB ~= 1.2e-4 rounding budget on Q15 round
 TOL_NCO_MAG_REL        = 0.04  # quarter-wave LUT artifact at quadrant edges
-TOL_FFT_ROUNDTRIP_LSB  = 60    # 11 stages × Q15 noise on 2048-pt; empirical
+TOL_FFT_ROUNDTRIP_LSB  = 60    # 11 stages * Q15 noise on 2048-pt; empirical
 
 
 # =============================================================================
@@ -169,7 +167,10 @@ def check_twiddle_rom(result: CheckResult, n: int, mem_filename: str):
             bad.append((k, cos_rom[k], ideal, dev))
     result.check(
         max_dev <= TOL_TWIDDLE_LSB,
-        f"{mem_filename}: all {expected_entries} entries match cos(2pi*k/{n}) Q15 (tol {TOL_TWIDDLE_LSB} LSB)",
+        (
+            f"{mem_filename}: all {expected_entries} entries match "
+            f"cos(2pi*k/{n}) Q15 (tol {TOL_TWIDDLE_LSB} LSB)"
+        ),
         f"max |ROM - ideal| = {max_dev} LSB" + (
             f"; {len(bad)} bad, e.g. k={bad[0][0]}: ROM={bad[0][1]}, ideal={bad[0][2]}"
             if bad else ""
@@ -186,7 +187,10 @@ def check_doppler_window_lut(result: CheckResult):
     worst_idx = int(np.argmax(diff))
     result.check(
         max_dev <= TOL_WINDOW_LSB,
-        f"DOPPLER_WINDOW_COEFF: all 16 entries match Dolph-Chebyshev 60 dB Q15 (tol {TOL_WINDOW_LSB} LSB)",
+        (
+            f"DOPPLER_WINDOW_COEFF: all 16 entries match "
+            f"Dolph-Chebyshev 60 dB Q15 (tol {TOL_WINDOW_LSB} LSB)"
+        ),
         f"max |LUT - ideal| = {max_dev} LSB at n={worst_idx} "
         f"(LUT={int(win_lut[worst_idx])}, ideal={int(win_ref[worst_idx])})"
     )
@@ -233,7 +237,7 @@ def check_nco_invariants(result: CheckResult):
     z = cos_arr + 1j * sin_arr
     Z = np.fft.fft(z)
     peak_bin = int(np.argmax(np.abs(Z)))
-    expected_bin = int(round(ftw / (1 << 32) * n_capture))
+    expected_bin = round(ftw / (1 << 32) * n_capture)
     result.check(
         abs(peak_bin - expected_bin) <= 1,
         f"NCO dominant frequency at FTW = {ftw:08X} (expected bin {expected_bin})",
@@ -264,8 +268,8 @@ def check_fft_invariants(result: CheckResult):
     # peak = amp*N stays below Q15 saturation (32767).
     bin_k = 137
     amp = 15
-    in_re = [int(round(amp * math.cos(2 * math.pi * bin_k * i / n))) for i in range(n)]
-    in_im = [int(round(amp * math.sin(2 * math.pi * bin_k * i / n))) for i in range(n)]
+    in_re = [round(amp * math.cos(2 * math.pi * bin_k * i / n)) for i in range(n)]
+    in_im = [round(amp * math.sin(2 * math.pi * bin_k * i / n)) for i in range(n)]
     twin_re, twin_im = fft.compute(in_re, in_im, inverse=False)
     ref_re, ref_im = ref.fft_reference(in_re, in_im, n=n)
     twin_mag2 = np.array(twin_re) ** 2 + np.array(twin_im) ** 2
@@ -280,7 +284,7 @@ def check_fft_invariants(result: CheckResult):
 
     # Roundtrip — small amplitude (peak = amp*N/2 ≤ 32767 → amp ≤ 32) so the
     # forward FFT does not saturate, then IFFT should recover input within
-    # 11×Q15 butterfly noise.
+    # 11*Q15 butterfly noise.
     rt_amp = 30
     in_re = [int(rt_amp * math.sin(2 * math.pi * 73 * i / n)) for i in range(n)]
     in_im = [0] * n
@@ -289,7 +293,10 @@ def check_fft_invariants(result: CheckResult):
     rt_max_err = max(abs(rt_re[i] - in_re[i]) for i in range(n))
     result.check(
         rt_max_err <= TOL_FFT_ROUNDTRIP_LSB,
-        f"FFT-2048(roundtrip, amp={rt_amp}): FFT->IFFT recovers input within {TOL_FFT_ROUNDTRIP_LSB} LSB",
+        (
+            f"FFT-2048(roundtrip, amp={rt_amp}): FFT->IFFT recovers input "
+            f"within {TOL_FFT_ROUNDTRIP_LSB} LSB"
+        ),
         f"max |rt - in| = {rt_max_err}"
     )
 
@@ -309,8 +316,8 @@ def check_mf_invariants(result: CheckResult):
     ref_im_in = [0] * n
     pulse_len = 256
     for i in range(pulse_len):
-        ref_re_in[i] = int(round(amp * math.cos(2 * math.pi * bin_k * i / pulse_len)))
-        ref_im_in[i] = int(round(amp * math.sin(2 * math.pi * bin_k * i / pulse_len)))
+        ref_re_in[i] = round(amp * math.cos(2 * math.pi * bin_k * i / pulse_len))
+        ref_im_in[i] = round(amp * math.sin(2 * math.pi * bin_k * i / pulse_len))
         sig_re[i + delay] = ref_re_in[i]
         sig_im[i + delay] = ref_im_in[i]
 
@@ -328,7 +335,7 @@ def check_mf_invariants(result: CheckResult):
         f"twin={twin_peak}, ref={ref_peak}"
     )
 
-    # Sidelobe behaviour: peak should be N×stronger than median.
+    # Sidelobe behaviour: peak should be N*stronger than median.
     twin_peak_val = float(twin_mag[delay])
     twin_median = float(np.median(twin_mag))
     pk_ratio = twin_peak_val / max(twin_median, 1.0)
@@ -356,8 +363,8 @@ def check_doppler_invariants(result: CheckResult):
         for c in range(chirps_per_subframe):
             chirp_idx = sf * chirps_per_subframe + c
             phase = 2 * math.pi * dop_bin * c / chirps_per_subframe
-            chirp_i[chirp_idx, target_rbin] = int(round(amp * math.cos(phase)))
-            chirp_q[chirp_idx, target_rbin] = int(round(amp * math.sin(phase)))
+            chirp_i[chirp_idx, target_rbin] = round(amp * math.cos(phase))
+            chirp_q[chirp_idx, target_rbin] = round(amp * math.sin(phase))
 
     dop = DopplerProcessor(num_subframes=num_subframes,
                            chirps_per_frame=chirps_per_frame)

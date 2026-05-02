@@ -44,7 +44,7 @@ import numpy as np
 # NCO reference — ideal complex sinusoid
 # =============================================================================
 
-def nco_reference(num_samples: int, ftw: int, fs: float = 400e6,
+def nco_reference(num_samples: int, ftw: int,
                   phase_offset_deg: float = 0.0):
     """Ideal floating-point NCO output, scaled to match Q15 fpga_model.
 
@@ -101,10 +101,7 @@ def fft_reference(in_re, in_im, n: int = 2048, inverse: bool = False):
     if len(re) != n or len(im) != n:
         raise ValueError(f"input length {len(re)} != N={n}")
     x = re + 1j * im
-    if inverse:
-        y = np.fft.ifft(x)
-    else:
-        y = np.fft.fft(x) / n
+    y = np.fft.ifft(x) if inverse else np.fft.fft(x) / n
     return y.real.copy(), y.imag.copy()
 
 
@@ -221,7 +218,7 @@ def doppler_reference(chirp_data_i, chirp_data_q,
 def _self_test():
     """Quick sanity checks."""
     # NCO: at FTW = 0x4CCCCCCD, frequency = 0.3 * fs = 120 MHz at 400 MSPS.
-    cos_q15, sin_q15 = nco_reference(8, 0x4CCCCCCD, fs=400e6)
+    cos_q15, sin_q15 = nco_reference(8, 0x4CCCCCCD)
     # First sample should be cos(0)=1, sin(0)=0 in Q15
     assert abs(cos_q15[0] - 32767.0) < 1.0, f"NCO[0].cos = {cos_q15[0]}"
     assert abs(sin_q15[0]) < 1.0, f"NCO[0].sin = {sin_q15[0]}"
@@ -229,7 +226,7 @@ def _self_test():
     # FFT: impulse -> all bins = amplitude/N (scaled-mode schedule)
     in_re = [1000] + [0] * 15
     in_im = [0] * 16
-    out_re, out_im = fft_reference(in_re, in_im, n=16)
+    out_re, _out_im = fft_reference(in_re, in_im, n=16)
     for k in range(16):
         # AUDIT-C10/C-8: FWD FFT now applies /N (=/16), so each bin = 1000/16
         assert abs(out_re[k] - 1000.0 / 16.0) < 1e-9, \
