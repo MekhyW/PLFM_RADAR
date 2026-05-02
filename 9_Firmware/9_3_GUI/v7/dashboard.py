@@ -2,7 +2,7 @@
 v7.dashboard — Main application window for the PLFM Radar GUI V7.
 
 RadarDashboard is a QMainWindow with six tabs:
-  1. Main View   — Range-Doppler matplotlib canvas (64x32), device combos,
+  1. Main View   — Range-Doppler matplotlib canvas (512x48), device combos,
                    Start/Stop, targets table
   2. Map View    — Embedded Leaflet map + sidebar
   3. FPGA Control — Full FPGA register control panel (all 27 opcodes incl. AGC,
@@ -62,6 +62,8 @@ from .hardware import (
     StatusResponse,
     DataRecorder,
     STM32USBInterface,
+    NUM_RANGE_BINS,
+    NUM_DOPPLER_BINS,
 )
 from .processing import RadarProcessor, USBPacketParser
 from .workers import RadarDataWorker, GPSDataWorker, TargetSimulator, ReplayWorker
@@ -72,10 +74,6 @@ if TYPE_CHECKING:
     from .replay import ReplayEngine
 
 logger = logging.getLogger(__name__)
-
-# Frame dimensions from FPGA (mirrors radar_protocol.NUM_*; PR-F/PR-Q)
-NUM_RANGE_BINS = 64
-NUM_DOPPLER_BINS = 48
 
 # Force C locale (period as decimal separator) for all QDoubleSpinBox instances.
 _C_LOCALE = QLocale(QLocale.Language.C)
@@ -1665,7 +1663,7 @@ class RadarDashboard(QMainWindow):
 
     @pyqtSlot(object)
     def _on_frame_ready(self, frame: RadarFrame):
-        """Handle a complete 64x32 radar frame from production acquisition."""
+        """Handle a complete radar frame (NUM_RANGE_BINS x NUM_DOPPLER_BINS) from production acquisition."""  # noqa: E501
         self._current_frame = frame
         self._frame_count += 1
 

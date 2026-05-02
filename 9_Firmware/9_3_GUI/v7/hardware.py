@@ -32,6 +32,8 @@ from radar_protocol import (  # noqa: F401 — re-exported for v7 package
     RadarFrame,
     StatusResponse,
     DataRecorder,
+    NUM_RANGE_BINS,
+    NUM_DOPPLER_BINS,
 )
 
 logger = logging.getLogger(__name__)
