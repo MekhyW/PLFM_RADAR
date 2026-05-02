@@ -61,7 +61,7 @@ T_SHORT_CHIRP = 0.5e-6    # 0.5 us short chirp
 T_LISTEN_LONG = 137e-6    # 137 us listening window
 T_PRI_LONG = 167e-6       # 30 us chirp + 137 us listen   (sub-frame 2: LONG)
 T_PRI_SHORT = 175e-6      # 1 us chirp + 174 us listen    (sub-frame 0: SHORT)
-T_PRI_MEDIUM = 175e-6     # 5 us chirp + 170 us listen    (sub-frame 1: MEDIUM)
+T_PRI_MEDIUM = 161e-6     # 5 us chirp + 156 us listen    (sub-frame 1: MEDIUM, PR-Q stagger)
 N_SAMPLES_LISTEN = int(T_LISTEN_LONG * FS_ADC)  # 54800 samples
 
 # Processing chain

@@ -92,7 +92,7 @@ def make_scenario_moving():
     """Single target with moderate Doppler shift."""
     # v = 15 m/s -> fd = 2*v*fc/c ~= 1050 Hz
     # SHORT  PRI 175 us: bin = fd * 16 * 175e-6 ~= 2.94 -> sf0 bin ~3
-    # MEDIUM PRI 175 us: bin = fd * 16 * 175e-6 ~= 2.94 -> sf1 bin 16+3 = 19
+    # MEDIUM PRI 161 us: bin = fd * 16 * 161e-6 ~= 2.71 -> sf1 bin 16+3 = 19  (PR-Q)
     # LONG   PRI 167 us: bin = fd * 16 * 167e-6 ~= 2.81 -> sf2 bin 32+3 = 35
     targets = [Target(range_m=500, velocity_mps=15.0, rcs_dbsm=20.0)]
     return targets, "Single moving target v=15m/s (~1050Hz Doppler, sf0~3 sf1~19 sf2~35)"
