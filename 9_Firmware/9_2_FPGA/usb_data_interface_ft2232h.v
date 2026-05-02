@@ -13,7 +13,11 @@
  * Frame packet (FPGA→Host): variable length, up to 74,762 bytes
  *   Byte 0:       0xAA (frame start header)
  *   Byte 1:       0x02 (PROTOCOL VERSION — host MUST reject any other value)
- *   Byte 2:       Stream flags {5'b0, stream_cfar, stream_doppler, stream_range}
+ *   Byte 2:       Flags byte. Layout (PR-U / M-8 widened bits[5:3]):
+ *                   bits[7:6] = 2'b00 reserved
+ *                   bits[5:3] = subframe_enable[2:0] = {LONG, MEDIUM, SHORT}
+ *                               (host_subframe_enable snapshot at frame_complete)
+ *                   bits[2:0] = {stream_cfar, stream_doppler, stream_range}
  *   Bytes 3-4:    Frame number (uint16, MSB first)
  *   Bytes 5-6:    Range bin count   (uint16, MSB first) = `RP_NUM_RANGE_BINS`  (512)
  *   Bytes 7-8:    Doppler bin count (uint16, MSB first) = `RP_NUM_DOPPLER_BINS` (48)
@@ -126,6 +130,13 @@ module usb_data_interface_ft2232h (
 
     // Stream control input (clk domain, CDC'd internally)
     input wire [5:0] stream_control,
+
+    // PR-U / M-8: per-frame sub-frame enable mask (clk domain, CDC'd
+    // internally, snapshotted at frame_complete). {LONG, MEDIUM, SHORT}.
+    // Echoed in v2 frame byte 2 bits[5:3] so the host CRT can detect
+    // when an operator disables a sub-frame and downgrade confidence
+    // (default 3'b111 keeps the production 3-PRI ladder behavior).
+    input wire [2:0] subframe_enable,
 
     // Status readback inputs (clk domain, CDC'd internally)
     input wire status_request,
@@ -643,15 +654,21 @@ wire stream_cfar_en    = stream_ctrl_sync_1[2];
 
 // --- Frame metadata snapshot (latched in clk domain, stable for ft_clk read) ---
 reg [15:0] frame_number_snapshot;
-reg [2:0]  stream_flags_snapshot;  // PR-G: 3 bits used (range/doppler/cfar)
+reg [2:0]  stream_flags_snapshot;     // PR-G: 3 bits used (range/doppler/cfar)
+// PR-U / M-8: snapshot of host_subframe_enable taken at frame_complete so the
+// host parser sees the mask that was active for THIS frame (atomic per-frame).
+// Stable when ft_clk reads it via the frame_ready toggle synchronizer.
+reg [2:0]  subframe_enable_snapshot;  // {LONG, MEDIUM, SHORT}
 
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
-        frame_number_snapshot <= 16'd0;
-        stream_flags_snapshot <= 3'b111;  // PR-G: all 3 streams on (range|doppler|cfar)
+        frame_number_snapshot    <= 16'd0;
+        stream_flags_snapshot    <= 3'b111;  // PR-G: all 3 streams on (range|doppler|cfar)
+        subframe_enable_snapshot <= 3'b111;  // PR-U: all 3 sub-frames on (production default)
     end else if (frame_complete) begin
-        frame_number_snapshot <= frame_number;
-        stream_flags_snapshot <= stream_control[2:0];  // PR-G: ignore reserved [5:3]
+        frame_number_snapshot    <= frame_number;
+        stream_flags_snapshot    <= stream_control[2:0];  // PR-G: ignore reserved [5:3]
+        subframe_enable_snapshot <= subframe_enable;
     end
 end
 
@@ -968,7 +985,10 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         case (wr_byte_idx[3:0])
                             4'd0: ft_data_out <= HEADER;
                             4'd1: ft_data_out <= `RP_USB_PROTOCOL_VERSION;       // 0x02
-                            4'd2: ft_data_out <= {5'b00000, stream_flags_snapshot};
+                            // PR-U / M-8: byte 2 = {2'b00, subframe_enable[2:0], stream_flags[2:0]}.
+                            // Was {5'b00000, stream_flags_snapshot}; bits[5:3] now carry
+                            // the per-frame sub-frame mask snapshot {LONG, MEDIUM, SHORT}.
+                            4'd2: ft_data_out <= {2'b00, subframe_enable_snapshot, stream_flags_snapshot};
                             4'd3: ft_data_out <= frame_number_snapshot[15:8];
                             4'd4: ft_data_out <= frame_number_snapshot[7:0];
                             4'd5: ft_data_out <= NUM_RANGE_BINS[15:8];    // 512 >> 8 = 2

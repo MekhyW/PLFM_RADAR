@@ -1676,6 +1676,10 @@ class RadarDashboard(QMainWindow):
             0x2B: lambda v: fpga.set_agc_params(decay=v),
             0x2C: lambda v: fpga.set_agc_params(holdoff=v),
             0x2D: lambda v: fpga.set_cfar_alpha_soft(v),
+            # PR-U / M-8: track the operator's sub-frame mask so subsequent
+            # frames the host parses use the correct CRT confidence rules
+            # (replay frames carry the mask the FPGA echoed at capture time).
+            0x19: lambda v: fpga.set_subframe_enable(v),
         }
         # Inert in replay: RTL-only chirp timing / range mode / self-test /
         # status / ADC strap. The recorded I/Q already reflects whatever

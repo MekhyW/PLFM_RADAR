@@ -68,6 +68,8 @@ module tb_ft2232h_frame_drop;
     // PR-G: stream bits [2:0] all off → WR FSM: HDR → FOOTER → DONE
     // = fast deterministic drain. Bits [5:3] are reserved=0 in v2.
     reg [5:0] stream_control = 6'b000_000;
+    // PR-U / M-8: production 3-PRI ladder.
+    reg [2:0] subframe_enable = 3'b111;
 
     // Status inputs (irrelevant for this test)
     reg        status_request = 1'b0;
@@ -124,6 +126,8 @@ module tb_ft2232h_frame_drop;
         .cmd_addr(cmd_addr),
         .cmd_value(cmd_value),
         .stream_control(stream_control),
+        // PR-U / M-8: per-frame snapshot of host_subframe_enable.
+        .subframe_enable(subframe_enable),
         .status_request(status_request),
         .status_cfar_threshold(status_cfar_threshold),
         .status_stream_ctrl(status_stream_ctrl),

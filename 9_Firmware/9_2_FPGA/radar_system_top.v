@@ -272,6 +272,11 @@ reg [15:0] host_short_listen_cycles;  // Opcode 0x14 (default 17400, V2)
 reg [15:0] host_medium_chirp_cycles;  // Opcode 0x17 (default 500, PR-G G2)
 reg [15:0] host_medium_listen_cycles; // Opcode 0x18 (default 15600, PR-Q staggered PRI)
 reg [5:0]  host_chirps_per_elev;      // Opcode 0x15 (default 48 = RP_CHIRPS_PER_FRAME, PR-F)
+// PR-U / M-8: per-sub-frame enable mask routed end-to-end so the host knows
+// which sub-frames the chirp_scheduler emitted for a given frame. Bit 0 SHORT,
+// bit 1 MEDIUM, bit 2 LONG. Default 3'b111 keeps the production 3-PRI ladder.
+// Mirrored into v2 frame byte 2 bits[5:3] (usb_data_interface_ft2232h.v).
+reg [2:0]  host_subframe_enable;      // Opcode 0x19 (default RP_DEF_SUBFRAME_ENABLE = 3'b111)
 reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
 
 // Fix 4: Doppler/chirps mismatch protection
@@ -604,6 +609,9 @@ radar_receiver_final rx_inst (
     .host_medium_chirp_cycles(host_medium_chirp_cycles),
     .host_medium_listen_cycles(host_medium_listen_cycles),
     .host_chirps_per_elev(host_chirps_per_elev),
+    // PR-U / M-8: sub-frame enable mask, was tied to RP_DEF_SUBFRAME_ENABLE
+    // inside radar_receiver_final at the chirp_scheduler instance.
+    .host_subframe_enable(host_subframe_enable),
     // Fix 3: digital gain control
     .host_gain_shift(host_gain_shift),
     // AGC configuration (opcodes 0x28-0x2C)
@@ -933,6 +941,11 @@ end else begin : gen_ft2232h
         // Stream control
         .stream_control(host_stream_control),
 
+        // PR-U / M-8: per-frame snapshot of host_subframe_enable echoed in
+        // v2 frame byte 2 bits[5:3]. Lets the host detect when an operator
+        // disabled a sub-frame and downgrade CRT confidence accordingly.
+        .subframe_enable(host_subframe_enable),
+
         // Status readback inputs
         .status_request(host_status_request),
         .status_cfar_threshold(host_detect_threshold),
@@ -1060,6 +1073,8 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
         // chirps_per_elev register is echoed in status word 3 and used by host
         // sanity-checking. Keep cold-reset value in lockstep with the truth.
         host_chirps_per_elev      <= 6'd48;
+        // PR-U / M-8: 3'b111 = SHORT|MEDIUM|LONG all on (production 3-PRI ladder).
+        host_subframe_enable      <= `RP_DEF_SUBFRAME_ENABLE;
         host_status_request     <= 1'b0;
         chirps_mismatch_error   <= 1'b0;
         host_range_mode         <= 2'b00;     // Default: 3 km mode (all short chirps)
@@ -1111,6 +1126,11 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
                 // PR-G G2: MEDIUM ladder timings
                 8'h17: host_medium_chirp_cycles  <= usb_cmd_value;
                 8'h18: host_medium_listen_cycles <= usb_cmd_value;
+                // PR-U / M-8: sub-frame enable mask {LONG, MEDIUM, SHORT} =
+                // {value[2], value[1], value[0]}. Surfaced in v2 frame byte 2
+                // bits[5:3] so host CRT can detect mask != 3'b111 and degrade
+                // confidence rather than mis-attribute the SF axis.
+                8'h19: host_subframe_enable      <= usb_cmd_value[2:0];
                 8'h15: begin
                     // Fix 4: Clamp chirps_per_elev to the fixed Doppler frame size.
                     // If host requests a different value, clamp and set error flag.

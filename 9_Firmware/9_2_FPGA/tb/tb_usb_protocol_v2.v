@@ -66,6 +66,8 @@ module tb_usb_protocol_v2;
     // PR-G v2: enable all 3 streams (range|doppler|cfar). Bits [5:3] reserved=0.
     reg [5:0] stream_control     = 6'b000_111;
     reg [5:0] status_stream_ctrl = 6'b000_111;
+    // PR-U / M-8: production 3-PRI ladder (SHORT|MEDIUM|LONG).
+    reg [2:0] subframe_enable    = 3'b111;
 
     // Status inputs (mostly tied off; PR-G additions below)
     reg        status_request = 1'b0;
@@ -127,6 +129,9 @@ module tb_usb_protocol_v2;
         .cmd_addr(cmd_addr),
         .cmd_value(cmd_value),
         .stream_control(stream_control),
+        // PR-U / M-8: per-frame snapshot of host_subframe_enable echoed in
+        // v2 frame byte 2 bits[5:3].
+        .subframe_enable(subframe_enable),
         .status_request(status_request),
         .status_cfar_threshold(status_cfar_threshold),
         .status_stream_ctrl(status_stream_ctrl),
@@ -251,7 +256,10 @@ module tb_usb_protocol_v2;
         wait_clk(150);
         check_b("T2.1: byte0 = 0xAA",         egress_bytes[0] == 8'hAA);
         check_b("T2.2: byte1 = 0x02 (ver)",   egress_bytes[1] == `RP_USB_PROTOCOL_VERSION);
-        check_b("T2.3: byte2 = stream flags=0", egress_bytes[2] == 8'h00);
+        // PR-U / M-8: byte 2 = {2'b00, subframe_enable[2:0], stream[2:0]}.
+        // subframe_enable defaults to 3'b111 → byte 2 = (0b111 << 3) | 0 = 0x38.
+        check_b("T2.3: byte2 = {00, sf=111, stream=0} = 0x38",
+                egress_bytes[2] == 8'h38);
         // Byte 3-4 = frame_number snapshot. snapshot latches OLD frame_number
         // at frame_complete (NBA), so first frame emitted carries fn=0.
         check_b("T2.4: byte3 = fn[15:8]=0",   egress_bytes[3] == 8'h00);

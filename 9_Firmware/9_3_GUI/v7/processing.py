@@ -698,6 +698,15 @@ def extract_targets_from_frame_crt(
             gps=gps,
         )
 
+    # PR-U / M-8: when the operator disabled a sub-frame at the FPGA, the
+    # chirp_scheduler runs only the enabled SFs but doppler_processor still
+    # emits 48 chirp slots — `dbin // 16 → {SHORT, MED, LONG}` no longer
+    # attributes correctly. Force AMBIGUOUS for every target so the dashboard
+    # column flags it red. Default 0b111 keeps the production happy path on
+    # the CONFIRMED branch via the normal CRT logic.
+    sf_mask = getattr(frame, "subframe_enable", 0b111) & 0x07
+    sf_mask_invalid = (sf_mask != 0b111)
+
     chirps_per_sf = waveform.chirps_per_subframe  # 16
     v_res_per_sf_all = [
         waveform.velocity_resolution_short_mps,
@@ -746,6 +755,8 @@ def extract_targets_from_frame_crt(
         v_est, confidence, alias_set = unfold_velocity_crt(
             v_meas_list, v_unamb_list, v_res_list, max_alias_k=max_alias_k,
         )
+        if sf_mask_invalid:
+            confidence = "AMBIGUOUS"
 
         range_m = float(rbin) * range_resolution
         snr = 10.0 * math.log10(max(peak_mag, 1.0)) if peak_mag > 0 else 0.0

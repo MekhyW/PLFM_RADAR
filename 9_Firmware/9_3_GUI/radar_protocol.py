@@ -99,12 +99,22 @@ BULK_FRAME_MAX_SIZE         = (BULK_FRAME_HEADER_SIZE + BULK_RANGE_SECTION_BYTES
                                + BULK_DOPPLER_MAG_BYTES + BULK_DETECT_DENSE_BYTES
                                + BULK_FOOTER_SIZE)                          # 56330
 
-# Bulk-frame format flag bits (matches stream_ctrl_sync_1 layout in RTL).
-# Only the low 3 bits are used on the wire; bits [7:3] are reserved-zero.
+# Bulk-frame format flag bits.
+# Layout (PR-U / M-8):
+#   bits[2:0] = stream flags {cfar, doppler, range} (matches stream_ctrl_sync_1)
+#   bits[5:3] = subframe_enable mask {LONG, MEDIUM, SHORT}
+#               snapshot of host_subframe_enable at frame_complete (FPGA opcode 0x19).
+#               Default 3'b111 keeps the production 3-PRI ladder; mask != 3'b111
+#               means an operator disabled a sub-frame and the host should
+#               downgrade CRT confidence (dbin // 16 attribution would mis-bin).
+#   bits[7:6] = reserved-zero — any non-zero in this mask rejects the frame.
 BULK_FLAG_STREAM_RANGE   = 0x01
 BULK_FLAG_STREAM_DOPPLER = 0x02
 BULK_FLAG_STREAM_CFAR    = 0x04
-BULK_FLAGS_RESERVED_MASK = 0xF8     # any bit in this mask set → reject frame
+BULK_SUBFRAME_ENABLE_MASK  = 0x38   # bits[5:3] = subframe_enable[2:0]
+BULK_SUBFRAME_ENABLE_SHIFT = 3
+BULK_SUBFRAME_ENABLE_ALL   = 0b111  # SHORT | MEDIUM | LONG
+BULK_FLAGS_RESERVED_MASK = 0xC0     # any bit in this mask set → reject frame
 
 
 class Opcode(IntEnum):
@@ -124,6 +134,7 @@ class Opcode(IntEnum):
         0x16  host_gain_shift
         0x17  host_medium_chirp_cycles  (PR-G G2)
         0x18  host_medium_listen_cycles (PR-G G2)
+        0x19  host_subframe_enable      (PR-U / M-8 — 3-bit {LONG, MED, SHORT} mask)
     """
     # --- Basic control (0x01-0x04) ---
     RADAR_MODE          = 0x01  # 2-bit mode select
@@ -145,6 +156,13 @@ class Opcode(IntEnum):
     # PRI = 161 us so the 3-PRI CRT unfolder has 3 distinct PRIs (175/161/167).
     MEDIUM_CHIRP        = 0x17
     MEDIUM_LISTEN       = 0x18
+
+    # PR-U / M-8: 3-bit sub-frame enable mask {LONG, MEDIUM, SHORT}. Default
+    # 3'b111 = all on. Setting != 3'b111 disables a sub-frame at the chirp
+    # scheduler; the FPGA echoes the mask in v2 frame byte 2 bits[5:3] so the
+    # host CRT downgrades confidence to UNKNOWN (dbin // 16 attribution would
+    # otherwise be wrong when the scheduler skips a sub-frame).
+    SUBFRAME_ENABLE     = 0x19
 
     # --- Signal processing (0x20-0x27) ---
     RANGE_MODE          = 0x20
@@ -209,6 +227,14 @@ class RadarFrame:
     # mag_only=1 (the only mode FPGA emits today). I/Q arrays will be zero;
     # `magnitude` carries the per-cell Manhattan magnitude from the FPGA.
     mag_only: bool = False
+    # PR-U / M-8: 3-bit sub-frame mask {LONG, MEDIUM, SHORT} snapshot from
+    # the FPGA at frame_complete (v2 frame byte 2 bits[5:3]). Default 0b111
+    # is the production 3-PRI ladder. Anything else means an operator
+    # disabled a sub-frame and the host CRT must downgrade confidence —
+    # `dbin // 16 → {SHORT, MED, LONG}` no longer attributes correctly when
+    # the chirp scheduler runs only the enabled sub-frames into 48 chirp
+    # slots in the doppler_processor.
+    subframe_enable: int = 0b111
 
 
 @dataclass
@@ -456,10 +482,14 @@ class RadarProtocol:
             return None
 
         flags = raw[offset + 2]
-        # Only the low 3 bits are defined (range/doppler/cfar). Any reserved
-        # bit set means a future revision or corruption — reject and resync.
+        # bits[2:0] = stream {cfar,doppler,range}; bits[5:3] = subframe_enable;
+        # bits[7:6] reserved-zero. Any reserved bit set means a future revision
+        # or corruption — reject and resync.
         if flags & BULK_FLAGS_RESERVED_MASK:
             return None
+        # PR-U / M-8: surface the per-frame sub-frame mask so the host CRT can
+        # detect mask != 0b111 and degrade rather than mis-attribute the SF axis.
+        subframe_enable = (flags & BULK_SUBFRAME_ENABLE_MASK) >> BULK_SUBFRAME_ENABLE_SHIFT
 
         frame_number = (raw[offset + 3] << 8) | raw[offset + 4]
         n_range      = (raw[offset + 5] << 8) | raw[offset + 6]
@@ -497,14 +527,15 @@ class RadarProtocol:
             cursor += BULK_DETECT_DENSE_BYTES
 
         return {
-            "frame_number":  frame_number,
-            "flags":         flags,
-            "n_range":       n_range,
-            "n_doppler":     n_doppler,
-            "range_profile": range_profile,
-            "doppler_mag":   doppler_mag,
-            "cfar_dense":    cfar_dense,
-            "frame_size":    size,
+            "frame_number":     frame_number,
+            "flags":            flags,
+            "subframe_enable":  subframe_enable,
+            "n_range":          n_range,
+            "n_doppler":        n_doppler,
+            "range_profile":    range_profile,
+            "doppler_mag":      doppler_mag,
+            "cfar_dense":       cfar_dense,
+            "frame_size":       size,
         }
 
     @staticmethod
@@ -732,7 +763,11 @@ class FT2232HConnection:
         buf = bytearray(BULK_FRAME_MAX_SIZE)
         buf[0] = HEADER_BYTE
         buf[1] = RP_USB_PROTOCOL_VERSION
-        buf[2] = flags & 0x07  # only 3 stream-enable bits valid; reserved zero
+        # PR-U / M-8: byte 2 = bits[2:0] stream + bits[5:3] subframe_enable +
+        # bits[7:6] reserved-zero. Mock emits the production 3-PRI ladder
+        # (mask = 0b111) so dashboards see CONFIRMED CRT confidence.
+        buf[2] = ((BULK_SUBFRAME_ENABLE_ALL << BULK_SUBFRAME_ENABLE_SHIFT)
+                  | (flags & 0x07))
         buf[3] = (self._mock_frame_num >> 8) & 0xFF
         buf[4] = self._mock_frame_num & 0xFF
         buf[5] = (NUM_RANGE_BINS >> 8) & 0xFF
@@ -1120,6 +1155,9 @@ class RadarAcquisition(threading.Thread):
         # path implemented in the FPGA write FSM), so flag this for downstream
         # consumers that expect mag-only when reading from bulk.
         frame.mag_only = True
+        # PR-U / M-8: per-frame snapshot of host_subframe_enable (FPGA opcode
+        # 0x19, default 0b111). The CRT extractor uses this to gate confidence.
+        frame.subframe_enable = int(parsed.get("subframe_enable", 0b111)) & 0x07
 
         rprof = parsed["range_profile"]
         if rprof is not None:

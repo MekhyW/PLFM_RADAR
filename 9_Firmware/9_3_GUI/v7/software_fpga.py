@@ -109,6 +109,12 @@ class SoftwareFPGA:
         self.agc_decay: int = 1                # 0x2B
         self.agc_holdoff: int = 4              # 0x2C
 
+        # PR-U / M-8: 3-bit sub-frame mask {LONG, MEDIUM, SHORT}. Default 0b111
+        # = production 3-PRI ladder. Tracked only — replay frames are already
+        # rendered, so the mask doesn't affect playback math here. Surfaces in
+        # the parsed RadarFrame from radar_protocol so the CRT extractor sees it.
+        self.subframe_enable: int = 0b111      # 0x19
+
     # ------------------------------------------------------------------
     # Register setters (same interface as UART commands to real FPGA)
     # ------------------------------------------------------------------
@@ -132,6 +138,9 @@ class SoftwareFPGA:
 
     def set_cfar_alpha_soft(self, val: int) -> None:
         self.cfar_alpha_soft = int(val) & 0xFF
+
+    def set_subframe_enable(self, val: int) -> None:
+        self.subframe_enable = int(val) & 0x07
 
     def set_cfar_mode(self, val: int) -> None:
         self.cfar_mode = int(val) & 0x03

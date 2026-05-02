@@ -51,6 +51,10 @@ module radar_receiver_final (
     input wire [15:0] host_medium_chirp_cycles,
     input wire [15:0] host_medium_listen_cycles,
     input wire [5:0]  host_chirps_per_elev,
+    // PR-U / M-8: sub-frame enable mask {LONG, MEDIUM, SHORT}. Was tied to
+    // RP_DEF_SUBFRAME_ENABLE here at the chirp_scheduler instance; routed
+    // through radar_system_top opcode 0x19 so the host owns the mask.
+    input wire [2:0]  host_subframe_enable,
 
     // Digital gain control (Fix 3: between DDC output and matched filter)
     // [3]=direction: 0=amplify(left shift), 1=attenuate(right shift)
@@ -236,7 +240,9 @@ chirp_scheduler sched (
     .clk(clk),
     .reset_n(reset_n),
     .host_mode(host_mode),
-    .host_subframe_enable(`RP_DEF_SUBFRAME_ENABLE),
+    // PR-U / M-8: routed from radar_system_top opcode 0x19 (was the
+    // RP_DEF_SUBFRAME_ENABLE constant — host had no way to mask sub-frames).
+    .host_subframe_enable(host_subframe_enable),
     .host_short_chirp_cycles (host_short_chirp_cycles),
     .host_short_listen_cycles(host_short_listen_cycles),
     // PR-G G2: MEDIUM now flows from radar_system_top opcodes 0x17/0x18.
