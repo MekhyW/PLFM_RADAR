@@ -551,3 +551,222 @@ def extract_targets_from_frame(
             timestamp=frame.timestamp,
         ))
     return targets
+
+
+# ============================================================================
+# PR-Q.5 — 3-PRI Chinese-Remainder Doppler unfolding (audit C-5)
+# ============================================================================
+
+def unfold_velocity_crt(
+    v_meas_per_sf: list[float],
+    v_unamb_per_sf: list[float],
+    v_res_per_sf: list[float] | None = None,
+    max_alias_k: int = 6,
+    tol_factor: float = 0.5,
+) -> tuple[float, str, list[float]]:
+    """3-PRI Chinese-Remainder Doppler velocity unfolding.
+
+    Each per-subframe FFT measures v_true folded into a signed
+    [-v_unamb_i, +v_unamb_i] interval (the standard fftshift
+    convention).  With 3 coprime PRIs (PR-Q ladder: 175/161/167 us,
+    giving v_unamb ≈ 40.79/44.34/42.79 m/s), brute-force search over
+    alias depth k_0 ∈ [-K, K] generates candidates
+    ``v_true = v_meas_0 + k_0 · 2 · v_unamb_0``.  A candidate is
+    *valid* when it folds back into all other active PRIs to within
+    ``tol_factor × max(v_res)``.
+
+    Args:
+        v_meas_per_sf: signed velocity measurement per active sub-frame
+            (m/s), already folded by the FFT.  Length 1, 2, or 3.
+        v_unamb_per_sf: per-sub-frame v_unamb (m/s), same length.
+        v_res_per_sf: per-sub-frame v_res (m/s).  If None, assumes
+            ``v_res = v_unamb / 8`` (matches chirps_per_subframe = 16).
+        max_alias_k: alias search depth in PRI-0 fold steps.  K=6 covers
+            ±6 · 2 · v_unamb_0 ≈ ±490 m/s, well above
+            ``WaveformConfig.extended_max_velocity_mps_crt(K=6) ≈ ±266``.
+        tol_factor: per-PRI agreement tolerance, in units of max(v_res).
+            1.0 = within one bin width.
+
+    Returns:
+        (v_est, confidence, alias_set):
+
+        - v_est (m/s): best-fit unfolded velocity.  Falls back to PRI-0's
+          measurement if no candidate satisfies all PRIs within tolerance.
+        - confidence: ``"CONFIRMED"`` / ``"LIKELY"`` / ``"AMBIGUOUS"``.
+            * CONFIRMED — 3-PRI input, exactly one fold within tolerance.
+            * LIKELY    — 3-PRI input with 2 candidates, or 2-PRI input
+                          with a unique solution.
+            * AMBIGUOUS — 1-PRI input (no CRT possible), 3+ candidates,
+                          2-PRI input with 2 candidates, or no candidate
+                          within tolerance.
+        - alias_set (m/s): all candidate v_true within tolerance, sorted
+          by goodness-of-fit (best first).
+    """
+    n_sf = len(v_meas_per_sf)
+    if n_sf != len(v_unamb_per_sf):
+        raise ValueError("v_meas_per_sf and v_unamb_per_sf must have same length")
+    if n_sf == 0:
+        return (0.0, "AMBIGUOUS", [])
+
+    # 1-PRI input — no CRT possible (LONG-only-at-20-km regime).
+    if n_sf == 1:
+        return (v_meas_per_sf[0], "AMBIGUOUS", [v_meas_per_sf[0]])
+
+    if v_res_per_sf is None:
+        v_res_per_sf = [vu / 8.0 for vu in v_unamb_per_sf]
+    elif len(v_res_per_sf) != n_sf:
+        raise ValueError("v_res_per_sf, when provided, must match v_meas_per_sf length")
+
+    pri0_meas = v_meas_per_sf[0]
+    pri0_span = 2.0 * v_unamb_per_sf[0]
+
+    candidates: list[tuple[float, float]] = []  # (v_candidate, max_err)
+    for k in range(-max_alias_k, max_alias_k + 1):
+        v_cand = pri0_meas + k * pri0_span
+        max_err = 0.0
+        rejected = False
+        for i in range(1, n_sf):
+            vu_i = v_unamb_per_sf[i]
+            span_i = 2.0 * vu_i
+            v_pred_i = ((v_cand + vu_i) % span_i) - vu_i
+            err = abs(v_pred_i - v_meas_per_sf[i])
+            tol_i = tol_factor * v_res_per_sf[i]
+            if err > tol_i:
+                rejected = True
+                break
+            if err > max_err:
+                max_err = err
+        if not rejected:
+            candidates.append((v_cand, max_err))
+
+    if not candidates:
+        # No fold satisfies all PRIs — fall back to PRI-0, mark AMBIGUOUS.
+        return (pri0_meas, "AMBIGUOUS", [pri0_meas])
+
+    candidates.sort(key=lambda c: c[1])
+    v_best = candidates[0][0]
+    alias_set = [v for (v, _) in candidates]
+    n_cands = len(alias_set)
+
+    if n_cands >= 3:
+        confidence = "AMBIGUOUS"
+    elif n_sf == 3 and n_cands == 1:
+        confidence = "CONFIRMED"
+    elif n_sf == 3 and n_cands == 2:
+        confidence = "LIKELY"
+    elif n_sf == 2 and n_cands == 1:
+        confidence = "LIKELY"
+    else:  # n_sf == 2 and n_cands == 2
+        confidence = "AMBIGUOUS"
+
+    return (v_best, confidence, alias_set)
+
+
+def extract_targets_from_frame_crt(
+    frame,
+    waveform,
+    gps: GPSData | None = None,
+    max_alias_k: int = 6,
+) -> list[RadarTarget]:
+    """Extract RadarTargets from a 48-bin frame using 3-PRI CRT unfolding.
+
+    The 48 Doppler bins are organized as 3 sub-frames of 16:
+
+      bins  0..15: SHORT  PRI (``waveform.pri_short_s``)
+      bins 16..31: MEDIUM PRI (``waveform.pri_medium_s``)
+      bins 32..47: LONG   PRI (``waveform.pri_long_s``)
+
+    Within each sub-frame, the 16-pt FFT uses the standard signed-bin
+    convention: bin 0 = DC, bins 1..7 = positive v, bin 8 = Nyquist
+    (treated as +v_unamb), bins 9..15 = negative v.
+
+    Detections at the same range bin across different sub-frames are
+    grouped, and the strongest bin per (rbin, sub-frame) is taken as
+    that PRI's primary Doppler measurement.  ``unfold_velocity_crt``
+    resolves aliases when ≥2 sub-frames see the target.
+
+    Falls back to the legacy single-PRI ``extract_targets_from_frame``
+    when the frame is not 48-bin (e.g. 32-bin legacy recordings).
+    """
+    if frame.detections.ndim != 2 or frame.detections.shape[1] != 48:
+        return extract_targets_from_frame(
+            frame,
+            range_resolution=waveform.range_resolution_m,
+            velocity_resolution=waveform.velocity_resolution_long_mps,
+            gps=gps,
+        )
+
+    chirps_per_sf = waveform.chirps_per_subframe  # 16
+    v_res_per_sf_all = [
+        waveform.velocity_resolution_short_mps,
+        waveform.velocity_resolution_medium_mps,
+        waveform.velocity_resolution_long_mps,
+    ]
+    v_unamb_per_sf_all = [
+        waveform.max_velocity_short_mps,
+        waveform.max_velocity_medium_mps,
+        waveform.max_velocity_long_mps,
+    ]
+
+    # Group detections: rbin -> {sf_id: (peak_bin_in_sf, peak_mag)}
+    clusters: dict[int, dict[int, tuple[int, float]]] = {}
+    det_indices = np.argwhere(frame.detections > 0)
+    for idx in det_indices:
+        rbin, dbin = int(idx[0]), int(idx[1])
+        sf_id = dbin // chirps_per_sf
+        bin_in_sf = dbin % chirps_per_sf
+        mag = float(frame.magnitude[rbin, dbin])
+        existing = clusters.setdefault(rbin, {}).get(sf_id)
+        if existing is None or mag > existing[1]:
+            clusters[rbin][sf_id] = (bin_in_sf, mag)
+
+    targets: list[RadarTarget] = []
+    range_resolution = waveform.range_resolution_m
+
+    for rbin in sorted(clusters.keys()):
+        sf_map = clusters[rbin]
+        active_sfs = sorted(sf_map.keys())
+        v_meas_list: list[float] = []
+        v_unamb_list: list[float] = []
+        v_res_list: list[float] = []
+        peak_mag = 0.0
+        for sf_id in active_sfs:
+            bin_in_sf, mag = sf_map[sf_id]
+            # Signed bin: 0..7 positive, 8 = Nyquist (treat as +8),
+            # 9..15 negative.  Yields v in [-8·v_res, +8·v_res].
+            signed_bin = bin_in_sf if bin_in_sf <= 8 else bin_in_sf - chirps_per_sf
+            v_meas_list.append(float(signed_bin) * v_res_per_sf_all[sf_id])
+            v_unamb_list.append(v_unamb_per_sf_all[sf_id])
+            v_res_list.append(v_res_per_sf_all[sf_id])
+            if mag > peak_mag:
+                peak_mag = mag
+
+        v_est, confidence, alias_set = unfold_velocity_crt(
+            v_meas_list, v_unamb_list, v_res_list, max_alias_k=max_alias_k,
+        )
+
+        range_m = float(rbin) * range_resolution
+        snr = 10.0 * math.log10(max(peak_mag, 1.0)) if peak_mag > 0 else 0.0
+
+        lat, lon, azimuth, elevation = 0.0, 0.0, 0.0, 0.0
+        if gps is not None:
+            azimuth = gps.heading
+            lat, lon = polar_to_geographic(
+                gps.latitude, gps.longitude, range_m, azimuth,
+            )
+
+        targets.append(RadarTarget(
+            id=len(targets),
+            range=range_m,
+            velocity=v_est,
+            azimuth=azimuth,
+            elevation=elevation,
+            latitude=lat,
+            longitude=lon,
+            snr=snr,
+            timestamp=frame.timestamp,
+            velocity_confidence=confidence,
+            alias_set=alias_set if alias_set else None,
+        ))
+
+    return targets

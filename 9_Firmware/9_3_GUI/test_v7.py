@@ -1012,6 +1012,285 @@ class TestExtractTargetsFromFrame(unittest.TestCase):
 
 
 # =============================================================================
+# Test: v7.processing.unfold_velocity_crt (PR-Q.5, audit C-5)
+# =============================================================================
+
+def _fold_v(v: float, v_unamb: float) -> float:
+    """Helper: fold v into signed [-v_unamb, +v_unamb] (FFT convention)."""
+    span = 2.0 * v_unamb
+    return ((v + v_unamb) % span) - v_unamb
+
+
+class TestUnfoldVelocityCRT(unittest.TestCase):
+    """3-PRI Chinese-Remainder Doppler unfolding."""
+
+    def _vu_vr(self):
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        v_unamb = [
+            wc.max_velocity_short_mps,
+            wc.max_velocity_medium_mps,
+            wc.max_velocity_long_mps,
+        ]
+        v_res = [
+            wc.velocity_resolution_short_mps,
+            wc.velocity_resolution_medium_mps,
+            wc.velocity_resolution_long_mps,
+        ]
+        return v_unamb, v_res
+
+    def test_zero_velocity_three_pri_confirmed(self):
+        """All zero measurements → v=0, single fold, CONFIRMED."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        v_est, conf, alias = unfold_velocity_crt([0.0, 0.0, 0.0], v_unamb, v_res)
+        self.assertAlmostEqual(v_est, 0.0, places=2)
+        self.assertEqual(conf, "CONFIRMED")
+        self.assertEqual(len(alias), 1)
+
+    def test_below_per_pri_unamb_three_pri_confirmed(self):
+        """v_true=30 m/s (below per-PRI v_unamb ~42 m/s): all 3 PRIs measure +30 directly."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        v_true = 30.0
+        v_meas = [_fold_v(v_true, vu) for vu in v_unamb]
+        # Sanity: each |v_meas| ≤ v_unamb
+        for vm, vu in zip(v_meas, v_unamb, strict=False):
+            self.assertLessEqual(abs(vm), vu)
+        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
+        self.assertAlmostEqual(v_est, v_true, places=1)
+        self.assertEqual(conf, "CONFIRMED")
+        self.assertEqual(len(alias), 1)
+
+    def test_above_per_pri_unamb_crt_unfolds_correctly(self):
+        """v_true=100 m/s (above any per-PRI v_unamb): 3-PRI CRT unfolds."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        v_true = 100.0
+        v_meas = [_fold_v(v_true, vu) for vu in v_unamb]
+        # Each per-PRI fold differs (since each PRI has different v_unamb)
+        self.assertNotAlmostEqual(v_meas[0], v_meas[1], places=1)
+        self.assertNotAlmostEqual(v_meas[1], v_meas[2], places=1)
+        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
+        self.assertAlmostEqual(v_est, v_true, places=1)
+        self.assertEqual(conf, "CONFIRMED")
+        self.assertEqual(len(alias), 1)
+
+    def test_negative_velocity_crt_unfolds(self):
+        """v_true=-75 m/s: CRT unfolds to a negative velocity."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        v_true = -75.0
+        v_meas = [_fold_v(v_true, vu) for vu in v_unamb]
+        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
+        self.assertAlmostEqual(v_est, v_true, places=1)
+        self.assertEqual(conf, "CONFIRMED")
+
+    def test_long_only_single_pri_ambiguous(self):
+        """1-PRI input → AMBIGUOUS (LONG-only-at-20-km regime)."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        # Only LONG sub-frame seeing the target.
+        v_est, conf, alias = unfold_velocity_crt(
+            [15.0], [v_unamb[2]], [v_res[2]],
+        )
+        self.assertAlmostEqual(v_est, 15.0, places=2)
+        self.assertEqual(conf, "AMBIGUOUS")
+        self.assertEqual(alias, [15.0])
+
+    def test_two_pri_consistent_likely(self):
+        """2-PRI consistent measurements → LIKELY (less constraint than 3-PRI)."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        v_true = 25.0
+        # SHORT + MEDIUM only (LONG dropped out, e.g. clutter).
+        v_meas = [_fold_v(v_true, v_unamb[0]), _fold_v(v_true, v_unamb[1])]
+        v_est, conf, alias = unfold_velocity_crt(
+            v_meas, [v_unamb[0], v_unamb[1]], [v_res[0], v_res[1]],
+        )
+        self.assertAlmostEqual(v_est, v_true, places=1)
+        self.assertEqual(conf, "LIKELY")
+
+    def test_inconsistent_measurements_ambiguous_fallback(self):
+        """Bogus per-PRI measurements that no fold reconciles → AMBIGUOUS, return PRI-0."""
+        from v7.processing import unfold_velocity_crt
+        v_unamb, v_res = self._vu_vr()
+        # Random per-PRI values that do not correspond to any v_true.
+        v_meas = [10.0, -30.0, 35.0]
+        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res)
+        self.assertEqual(conf, "AMBIGUOUS")
+        self.assertAlmostEqual(v_est, 10.0, places=2)  # PRI-0 fallback
+
+    def test_search_depth_covers_extended_ceiling(self):
+        """K=6 covers ±extended_max_velocity_mps_crt ≈ 266 m/s."""
+        from v7.processing import unfold_velocity_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        v_unamb, v_res = self._vu_vr()
+        # Pick v_true near the advertised CRT ceiling.
+        v_true = wc.extended_max_velocity_mps_crt(max_alias_k=6) - 5.0  # ~261 m/s
+        v_meas = [_fold_v(v_true, vu) for vu in v_unamb]
+        v_est, conf, alias = unfold_velocity_crt(v_meas, v_unamb, v_res, max_alias_k=6)
+        self.assertAlmostEqual(v_est, v_true, places=0)  # within 1 m/s
+        # Should still be CONFIRMED for a real velocity at this scale.
+        self.assertIn(conf, ("CONFIRMED", "LIKELY"))
+
+
+# =============================================================================
+# Test: v7.processing.extract_targets_from_frame_crt (PR-Q.5)
+# =============================================================================
+
+class TestExtractTargetsFromFrameCrt(unittest.TestCase):
+    """3-PRI cluster extractor with CRT unfolding."""
+
+    def _make_frame(self, det_cells_with_mag=None):
+        """Create RadarFrame; det_cells_with_mag is list of (rbin, dbin, mag)."""
+        from radar_protocol import RadarFrame
+        frame = RadarFrame()
+        if det_cells_with_mag:
+            for rbin, dbin, mag in det_cells_with_mag:
+                frame.detections[rbin, dbin] = 1
+                frame.magnitude[rbin, dbin] = mag
+        frame.detection_count = int(frame.detections.sum())
+        frame.timestamp = 1.0
+        return frame
+
+    def test_three_pri_target_confirmed(self):
+        """Detection at rbin=10 in all 3 sub-frames at bin 3 → CONFIRMED, v ≈ 15 m/s."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        # bins 3 / 19 / 35 = sub-frame {0, 1, 2} bin-in-sf 3.
+        frame = self._make_frame([
+            (10, 3, 1000.0),
+            (10, 19, 800.0),
+            (10, 35, 1200.0),
+        ])
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(len(targets), 1)
+        t = targets[0]
+        self.assertAlmostEqual(t.range, 10 * wc.range_resolution_m, places=1)
+        # bin 3 across PRIs maps to ~ 15 m/s (≈ 3 · v_res ≈ 15.3 / 16.6 / 16.0)
+        self.assertGreater(t.velocity, 12.0)
+        self.assertLess(t.velocity, 18.0)
+        self.assertEqual(t.velocity_confidence, "CONFIRMED")
+        self.assertIsNotNone(t.alias_set)
+        self.assertEqual(len(t.alias_set), 1)
+
+    def test_long_only_target_ambiguous(self):
+        """Detection only in LONG sub-frame at rbin=20 → AMBIGUOUS, single-PRI v."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        # dbin = 32 + 5 = 37 → LONG sub-frame, bin 5 (positive).
+        frame = self._make_frame([(20, 37, 1500.0)])
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(len(targets), 1)
+        t = targets[0]
+        self.assertEqual(t.velocity_confidence, "AMBIGUOUS")
+        # v should be close to 5 · v_res_long ≈ 26.7 m/s
+        expected_v = 5.0 * wc.velocity_resolution_long_mps
+        self.assertAlmostEqual(t.velocity, expected_v, places=1)
+
+    def test_two_pri_target_likely(self):
+        """Detection in SHORT + MEDIUM but not LONG → LIKELY."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        # bin 4 in SHORT (dbin=4), bin 4 in MEDIUM (dbin=20).
+        frame = self._make_frame([
+            (15, 4, 900.0),
+            (15, 20, 700.0),
+        ])
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].velocity_confidence, "LIKELY")
+
+    def test_strongest_bin_per_subframe_picked(self):
+        """Two detections in same sub-frame at same rbin: stronger one wins."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        # SHORT sub-frame: bins 3 (mag=500) and 5 (mag=1500) — bin 5 stronger.
+        # MEDIUM:          bin 5 (mag=1200) — matches.
+        # LONG:            bin 5 (mag=1100).
+        frame = self._make_frame([
+            (8, 3, 500.0),
+            (8, 5, 1500.0),
+            (8, 21, 1200.0),
+            (8, 37, 1100.0),
+        ])
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(len(targets), 1)
+        t = targets[0]
+        # Expected v ≈ 5 · v_res ≈ 25.5 m/s (3-PRI CRT picks the bin-5 fold).
+        self.assertGreater(t.velocity, 23.0)
+        self.assertLess(t.velocity, 28.0)
+        self.assertEqual(t.velocity_confidence, "CONFIRMED")
+
+    def test_two_targets_at_different_ranges(self):
+        """Two targets at distinct rbins → 2 RadarTargets, IDs sequential."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        frame = self._make_frame([
+            # Target A at rbin 5, all 3 sub-frames bin 2.
+            (5, 2, 800.0),  (5, 18, 700.0), (5, 34, 750.0),
+            # Target B at rbin 30, all 3 sub-frames bin 12 (negative velocity).
+            (30, 12, 600.0), (30, 28, 550.0), (30, 44, 580.0),
+        ])
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(len(targets), 2)
+        self.assertEqual([t.id for t in targets], [0, 1])
+        # rbin 5 should come first (sorted), with positive v; rbin 30 negative.
+        self.assertGreater(targets[0].velocity, 0)
+        self.assertLess(targets[1].velocity, 0)
+        for t in targets:
+            self.assertEqual(t.velocity_confidence, "CONFIRMED")
+
+    def test_falls_back_to_legacy_for_non_48_bin_frame(self):
+        """Frame with n_doppler != 48 → calls legacy extract_targets_from_frame."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        from radar_protocol import RadarFrame
+        # Synthesize a 32-bin frame manually.
+        frame = RadarFrame()
+        frame.detections = np.zeros((64, 32), dtype=np.uint8)
+        frame.magnitude = np.zeros((64, 32), dtype=np.float64)
+        frame.detections[5, 16] = 1  # legacy center
+        frame.magnitude[5, 16] = 1000.0
+        frame.detection_count = 1
+        frame.timestamp = 1.0
+        wc = WaveformConfig()
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(len(targets), 1)
+        # Legacy path → velocity_confidence stays default "UNKNOWN".
+        self.assertEqual(targets[0].velocity_confidence, "UNKNOWN")
+        self.assertIsNone(targets[0].alias_set)
+
+    def test_no_detections_returns_empty(self):
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig
+        wc = WaveformConfig()
+        frame = self._make_frame([])
+        targets = extract_targets_from_frame_crt(frame, wc)
+        self.assertEqual(targets, [])
+
+    def test_gps_georef_with_crt(self):
+        """GPS-georef populates lat/lon (smoke test)."""
+        from v7.processing import extract_targets_from_frame_crt
+        from v7.models import WaveformConfig, GPSData
+        wc = WaveformConfig()
+        gps = GPSData(latitude=41.9, longitude=12.5, altitude=0.0,
+                      pitch=0.0, heading=90.0)
+        frame = self._make_frame([(10, 3, 1000.0), (10, 19, 800.0), (10, 35, 1200.0)])
+        targets = extract_targets_from_frame_crt(frame, wc, gps=gps)
+        self.assertEqual(len(targets), 1)
+        self.assertAlmostEqual(targets[0].latitude, 41.9, places=2)
+        self.assertGreater(targets[0].longitude, 12.5)
+
+
+# =============================================================================
 # Helper: lazy import of v7.models
 # =============================================================================
 

@@ -90,6 +90,15 @@ class RadarTarget:
     timestamp: float = 0.0
     track_id: int = -1
     classification: str = "unknown"
+    # PR-Q.5 (audit C-5): 3-PRI Doppler unfolding output.
+    # velocity_confidence:
+    #   "CONFIRMED" — 3 sub-frames agree on a unique alias fold
+    #   "LIKELY"    — 2 sub-frames agree, or 3 sub-frames with 2 candidate folds
+    #   "AMBIGUOUS" — only 1 sub-frame saw the target (no CRT possible), or
+    #                 multiple aliases survive within tolerance
+    #   "UNKNOWN"   — extractor did not run CRT (legacy single-PRI path)
+    velocity_confidence: str = "UNKNOWN"
+    alias_set: list[float] | None = None  # Candidate v_true folds (m/s), best first
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""

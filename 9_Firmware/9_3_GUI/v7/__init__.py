@@ -43,6 +43,8 @@ from .processing import (
     apply_pitch_correction,
     polar_to_geographic,
     extract_targets_from_frame,
+    extract_targets_from_frame_crt,
+    unfold_velocity_crt,
 )
 
 # Software FPGA (depends on golden_reference.py in FPGA cosim tree)
@@ -96,7 +98,8 @@ __all__ = [  # noqa: RUF022
     # processing
     "RadarProcessor", "USBPacketParser",
     "apply_pitch_correction", "polar_to_geographic",
-    "extract_targets_from_frame",
+    "extract_targets_from_frame", "extract_targets_from_frame_crt",
+    "unfold_velocity_crt",
     # software FPGA + replay
     "SoftwareFPGA", "quantize_raw_iq",
     "ReplayEngine", "ReplayFormat",
