@@ -20,8 +20,9 @@
 #include <stdio.h>
 #include <stdint.h>
 
-/* Match main.cpp lines 182-183, 190-193 */
-static const int m_max = 32;
+/* Mirror main.cpp m_max/n_max (P-5 update: m_max 32 -> 48 to match
+ * RP_CHIRPS_PER_FRAME = 48 = 3 sub-frames * 16 chirps from PR-F). */
+static const int m_max = 48;
 static const int n_max = 31;
 
 static uint8_t g_m;
@@ -101,8 +102,8 @@ int main(void)
         printf("PASS: g_n advanced to 16 after 15 beam positions\n");
     }
 
-    /* m: each iter adds 3*(m_max/2)=48; reset to 1 when m>m_max=32.
-     * 1+48=49 -> reset to 1. So after every iter m=1. */
+    /* m: each iter adds 3*(m_max/2)=72; reset to 1 when m>m_max=48.
+     * 1+72=73 -> reset to 1. So after every iter m=1. */
     if (g_m != 1) {
         fprintf(stderr, "FAIL: g_m=%u (expected 1 after wrap)\n", g_m);
         failures++;

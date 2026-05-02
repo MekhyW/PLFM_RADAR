@@ -192,13 +192,19 @@ extern uint8_t GUI_start_flag_received;  // [STM32-006] Legacy, unused -- kept f
 
 
 //RADAR
-// Radar parameters
-const int m_max = 32;  // Number of chirps per beam position
+// Radar parameters — match the FPGA chirp_scheduler defaults defined in
+// 9_Firmware/9_2_FPGA/radar_params.vh (RP_DEF_*_CHIRP/LISTEN_CYCLES_V2).
+// PR-F: 48 chirps/frame = 3 sub-frames * 16 chirps each (SHORT/MEDIUM/LONG).
+// PR-Q.1: MEDIUM PRI staggered to 161 us so the 3 PRIs share no small
+// common period (175/161/167) — needed by the host CRT Doppler unfolder.
+const int m_max = 48;   // Chirps per frame (PR-F: 3 sub-frames * 16)
 const int n_max = 31;   // Number of beam positions
-const float T1 = 30.0f; // Chirp duration in microseconds
-const float PRI1 = 167.0f; // Pulse repetition interval in microseconds
-const float T2 = 0.5f;  // Short chirp duration in microseconds
-const float PRI2 = 175.0f; // Short PRI in microseconds
+const float T1 = 30.0f;     // LONG chirp duration in microseconds
+const float PRI1 = 167.0f;  // LONG PRI in microseconds
+const float T2 = 1.0f;      // SHORT chirp duration (PR-E: 0.5 us -> 1.0 us at 100 MHz)
+const float PRI2 = 175.0f;  // SHORT PRI in microseconds
+const float T_MEDIUM = 5.0f;     // MEDIUM chirp duration (PR-F)
+const float PRI_MEDIUM = 161.0f; // MEDIUM PRI (PR-Q.1 stagger)
 const float Guard = 175.4f; // Guard time in microseconds
 
 uint8_t	m = 1; // m = N° of chirp/ position = 16 (made of T1 and PRF1)+ Guard = 175µs +16 (made of T2 and PRF2)
@@ -244,15 +250,6 @@ ADAR1000_AGC    outerAgc;
 static uint8_t matrix1[15][16];
 static uint8_t matrix2[15][16];
 static uint8_t vector_0[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-
-/* Radar parameters
-const int m_max = 32;  // Number of chirps per beam position
-const int n_max = 31;   // Number of beam positions
-const float T1 = 30.0f; // Chirp duration in microseconds
-const float PRI1 = 167.0f; // Pulse repetition interval in microseconds
-const float T2 = 0.5f;  // Short chirp duration in microseconds
-const float T2 = 175.0f; // Short PRI in microseconds
-const float Guard = 175.40f; // Guard time in microseconds*/
 
 //Temperature Sensors
 ADS7830_HandleTypeDef hadc3;
@@ -527,6 +524,26 @@ void executeChirpSequence(int num_chirps, float T1, float PRI1, float T2, float 
     }
 }
 
+/* runRadarPulseSequence — beam-steering loop + STM32 pass-through GPIO toggles.
+ *
+ * IMPORTANT (P-5 / PR-Q.1 follow-up): in production the FPGA cold-resets to
+ * host_radar_mode = 2'b01 (auto-scan) — see radar_system_top.v:1045. In that
+ * mode the FPGA's chirp_scheduler owns chirp timing and IGNORES the GPIOD_8
+ * (new_chirp), GPIOD_9 (new_elevation), GPIOD_10 (new_azimuth) toggles this
+ * function emits via executeChirpSequence. The MCU's only live job per frame
+ * is therefore beam steering (ADAR1000 pattern updates) + stepper rotation.
+ *
+ * MODE 2'b00 (STM32 pass-through) requires the MCU to drive the 3-PRI ladder
+ *   SHORT  175 us  (T2=1 us chirp)
+ *   MEDIUM 161 us  (T_MEDIUM=5 us chirp)  -- PR-Q.1 stagger
+ *   LONG   167 us  (T1=30 us chirp)
+ * for the host-side CRT Doppler unfolder (processing.py extract_targets_from_
+ * frame_crt) to deliver unambiguous velocities. The current GPIO loop only
+ * emits two PRIs (PRI1=167 LONG, PRI2=175 SHORT) and is structured around
+ * the pre-PR-F m_max=32 frame, so pass-through mode is OPERATIONALLY
+ * UNSUPPORTED until this loop is rebuilt to dispatch 3 sub-frames in
+ * SHORT/MEDIUM/LONG order. Do not switch the FPGA into mode 00 until then.
+ */
 void runRadarPulseSequence() {
     static int sequence_count = 0;
     char msg[50];
