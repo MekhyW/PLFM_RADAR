@@ -64,7 +64,6 @@
 #define ADF4382A_MANAGER_ERROR_SPI       -3
 
 typedef enum {
-    SYNC_METHOD_EZSYNC = 0,
     SYNC_METHOD_TIMED = 1
 } SyncMethod;
 
@@ -83,9 +82,7 @@ typedef struct {
 int ADF4382A_Manager_Init(ADF4382A_Manager *manager, SyncMethod method);
 int ADF4382A_Manager_Deinit(ADF4382A_Manager *manager);
 int ADF4382A_SetupTimedSync(ADF4382A_Manager *manager);
-int ADF4382A_SetupEZSync(ADF4382A_Manager *manager);
 int ADF4382A_TriggerTimedSync(ADF4382A_Manager *manager);
-int ADF4382A_TriggerEZSync(ADF4382A_Manager *manager);
 int ADF4382A_CheckLockStatus(ADF4382A_Manager *manager, bool *tx_locked, bool *rx_locked);
 int ADF4382A_SetOutputPower(ADF4382A_Manager *manager, uint8_t tx_power, uint8_t rx_power);
 int ADF4382A_EnableOutputs(ADF4382A_Manager *manager, bool tx_enable, bool rx_enable);

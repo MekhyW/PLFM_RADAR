@@ -5,15 +5,15 @@
  * messages but performed no hardware action.
  *
  * Fix: Implemented a sw_sync pulse (set true → 10us delay → set false) on
- * both TX and RX devices, mirroring EZSync's trigger pattern. With
- * timed_sync_setup already programmed, the devices synchronize their output
- * dividers to the SYNCP/SYNCN clock edge when sw_sync is asserted.
+ * both TX and RX devices. With timed_sync_setup already programmed, the
+ * devices synchronize their output dividers to the SYNCP/SYNCN clock edge
+ * when sw_sync is asserted.
  *
  * Test strategy (post-fix):
  *   1. Initialize manager with SYNC_METHOD_TIMED.
  *   2. Reset spy log, call TriggerTimedSync().
  *   3. Verify 4 SPY_ADF4382_SET_SW_SYNC records (TX set, RX set, TX clear,
- *      RX clear) — same count as EZSync.
+ *      RX clear).
  *   4. Verify the set/clear ordering is correct.
  ******************************************************************************/
 #include "adf4382a_manager.h"
@@ -83,19 +83,7 @@ int main(void)
     assert(sw_idx == 4);
     printf("  PASS: Ordering is correct (set TX, set RX, clear TX, clear RX)\n");
 
-    /* ---- Test C: Compare with EZSync — both should produce 4 sw_sync calls ---- */
-    mgr.sync_method = SYNC_METHOD_EZSYNC;
-    spy_reset();
-    ret = ADF4382A_TriggerEZSync(&mgr);
-    assert(ret == ADF4382A_MANAGER_OK);
-    int ezsync_count = spy_count_type(SPY_ADF4382_SET_SW_SYNC);
-    printf("\n  EZSync sw_sync count: %d (expected 4, same as timed sync)\n",
-           ezsync_count);
-    assert(ezsync_count == 4);
-    printf("  PASS: Both sync methods now issue the same hw trigger pattern\n");
-
     /* Cleanup */
-    mgr.sync_method = SYNC_METHOD_TIMED;
     ADF4382A_Manager_Deinit(&mgr);
 
     printf("\n=== Bug #3: ALL TESTS PASSED (post-fix) ===\n\n");
