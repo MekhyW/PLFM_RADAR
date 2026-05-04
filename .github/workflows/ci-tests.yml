@@ -106,7 +106,10 @@ jobs:
   # ===========================================================================
   # Cross-Layer Contract Tests (Python ↔ Verilog ↔ C)
   # Validates opcode maps, bit widths, packet layouts, and round-trip
-  # correctness across FPGA RTL, Python GUI, and STM32 firmware.
+  # correctness across FPGA RTL, Python GUI, and STM32 firmware. Runs
+  # entirely as Python static parsers + the Tier 3 C stub; the v1-era
+  # iverilog cosim TB was retired post-PR-G (equivalent v2 coverage now
+  # lives in the FPGA regression's tb_usb_protocol_v2 / tb_system_opcodes).
   # ===========================================================================
   cross-layer-tests:
     name: Cross-Layer Contract Tests
@@ -123,9 +126,6 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --group dev
-
-      - name: Install Icarus Verilog
-        run: sudo apt-get update && sudo apt-get install -y iverilog
 
       - name: Run cross-layer contract tests
         run: >

@@ -128,7 +128,16 @@ def parse_python_opcodes(filepath: Path | None = None) -> dict[int, OpcodeEntry]
 
 
 def parse_python_packet_constants(filepath: Path | None = None) -> dict[str, PacketConstants]:
-    """Extract HEADER_BYTE, FOOTER_BYTE, STATUS_HEADER_BYTE, packet sizes."""
+    """
+    Extract HEADER_BYTE, FOOTER_BYTE, STATUS_HEADER_BYTE, STATUS_PACKET_SIZE.
+
+    Note on the data packet: PR-G replaced the fixed 11-byte v1 frame with a
+    variable-length bulk frame (header + optional sections + footer), so a
+    single ``DATA_PACKET_SIZE`` constant no longer characterizes the data
+    layer. Python keeps ``DATA_PACKET_SIZE = 11`` as a back-compat alias for
+    legacy FT601 log files; we deliberately do NOT cross-check it against
+    the FPGA, which has no equivalent localparam in either USB module.
+    """
     if filepath is None:
         filepath = GUI_DIR / "radar_protocol.py"
     text = filepath.read_text()
@@ -140,14 +149,11 @@ def parse_python_packet_constants(filepath: Path | None = None) -> dict[str, Pac
         val = m.group(1)
         return int(val, 16) if val.startswith("0x") else int(val)
 
-    header = _find(r'HEADER_BYTE\s*=\s*(0x[0-9a-fA-F]+|\d+)')
     footer = _find(r'FOOTER_BYTE\s*=\s*(0x[0-9a-fA-F]+|\d+)')
     status_header = _find(r'STATUS_HEADER_BYTE\s*=\s*(0x[0-9a-fA-F]+|\d+)')
-    data_size = _find(r'DATA_PACKET_SIZE\s*=\s*(\d+)')
     status_size = _find(r'STATUS_PACKET_SIZE\s*=\s*(\d+)')
 
     return {
-        "data": PacketConstants(header=header, footer=footer, size=data_size),
         "status": PacketConstants(header=status_header, footer=footer, size=status_size),
     }
 
@@ -372,39 +378,106 @@ def parse_verilog_opcodes(filepath: Path | None = None) -> dict[int, OpcodeEntry
     return opcodes
 
 
+def _resolve_verilog_value(rhs: str, macros: dict[str, int]) -> int | None:
+    """
+    Resolve a Verilog RHS expression to an integer. Supports:
+      * Plain decimal:           ``1234``
+      * Verilog literal:         ``16'd1234``, ``8'hAA``, ``2'b01``, ``6'b000_111``
+      * Macro reference:         ```MACRO_NAME``  (looked up in *macros*)
+      * Width-prefixed macro:    ``16'd`MACRO_NAME``
+    Returns None when the RHS can't be resolved (e.g. RHS is a wire name,
+    concatenation, or an undefined macro).
+    """
+    rhs = rhs.strip()
+
+    # Width-prefixed form: "16'd...", "8'h...", "2'b...", "4'o..."
+    width_match = re.match(r"^(\d+)'([bdho])(.*)$", rhs)
+    if width_match:
+        base_char = width_match.group(2)
+        rest = width_match.group(3).strip()
+        # Width-prefixed macro reference: 16'd`RP_DEF_FOO
+        if rest.startswith("`"):
+            return macros.get(rest[1:].strip())
+        digits = rest.replace("_", "")
+        if not re.fullmatch(r"[0-9a-fA-F]+", digits):
+            return None
+        base = {"b": 2, "d": 10, "h": 16, "o": 8}[base_char]
+        try:
+            return int(digits, base)
+        except ValueError:
+            return None
+
+    # Bare macro reference: `MACRO_NAME
+    if rhs.startswith("`"):
+        return macros.get(rhs[1:].strip())
+
+    # Plain decimal
+    if rhs.isdigit():
+        return int(rhs)
+
+    return None
+
+
+def parse_radar_params_macros(filepath: Path | None = None) -> dict[str, int]:
+    """
+    Parse `define directives in radar_params.vh into a name → integer map.
+    Resolves up to two macro→macro indirections (none expected today, kept
+    for forward compatibility).
+    """
+    if filepath is None:
+        filepath = FPGA_DIR / "radar_params.vh"
+    text = filepath.read_text()
+
+    raw: dict[str, str] = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*`define\s+(\w+)\s+(\S.*?)(?:\s*//.*)?\s*$", line)
+        if m:
+            raw[m.group(1)] = m.group(2).strip()
+
+    macros: dict[str, int] = {}
+    for _ in range(3):  # bounded fixed-point — file is small, runs in microseconds
+        progressed = False
+        for name, rhs in raw.items():
+            if name in macros:
+                continue
+            val = _resolve_verilog_value(rhs, macros)
+            if val is not None:
+                macros[name] = val
+                progressed = True
+        if not progressed:
+            break
+    return macros
+
+
 def parse_verilog_reset_defaults(filepath: Path | None = None) -> dict[str, int]:
     """
     Parse the reset block from radar_system_top.v.
     Returns {register_name: reset_value}.
+
+    Expands ```RP_DEF_*`` style macro references against radar_params.vh so
+    that fields like ``host_long_chirp_cycles <= 16'd`RP_DEF_LONG_CHIRP_CYCLES``
+    resolve to integers instead of being silently dropped.
     """
     if filepath is None:
         filepath = FPGA_DIR / "radar_system_top.v"
     text = filepath.read_text()
+    macros = parse_radar_params_macros()
 
     defaults: dict[str, int] = {}
 
-    # Match patterns like: host_radar_mode <= 2'b01;
-    # Also: host_detect_threshold <= 16'd10000;
-    for m in re.finditer(
-        r'(host_\w+)\s*<=\s*(\d+\'[bdho][0-9a-fA-F_]+|\d+)\s*;',
-        text
-    ):
+    # Capture every "host_X <= <expr>;" assignment, regardless of RHS form.
+    # Resolution to an integer happens via _resolve_verilog_value, which
+    # rejects (returns None for) RHSes that aren't statically known
+    # constants (e.g. concatenations or wire names from the opcode decode
+    # block — those land below the reset block, and we keep only the first
+    # occurrence anyway).
+    for m in re.finditer(r'(host_\w+)\s*<=\s*([^;]+?)\s*;', text):
         reg = m.group(1)
-        val_str = m.group(2)
-
-        # Parse Verilog literal
-        if "'" in val_str:
-            base_char = val_str.split("'")[1][0].lower()
-            digits = val_str.split("'")[1][1:].replace("_", "")
-            base = {"b": 2, "d": 10, "h": 16, "o": 8}[base_char]
-            value = int(digits, base)
-        else:
-            value = int(val_str)
-
-        # Only keep first occurrence (the reset block comes before the
-        # opcode decode which also has <= assignments)
-        if reg not in defaults:
-            defaults[reg] = value
+        if reg in defaults:
+            continue  # reset block precedes opcode block; first wins
+        val = _resolve_verilog_value(m.group(2), macros)
+        if val is not None:
+            defaults[reg] = val
 
     return defaults
 
@@ -435,7 +508,15 @@ def parse_verilog_register_widths(filepath: Path | None = None) -> dict[str, int
 def parse_verilog_packet_constants(
     filepath: Path | None = None,
 ) -> dict[str, PacketConstants]:
-    """Extract HEADER, FOOTER, STATUS_HEADER, packet size localparams."""
+    """
+    Extract HEADER, FOOTER, STATUS_HEADER, STATUS_PKT_LEN localparams.
+
+    Note: ``DATA_PKT_LEN`` was retired in PR-G when the data path moved to a
+    variable-length bulk frame (9-byte header + optional sections + 1-byte
+    footer). There is no equivalent constant in the v2 module; the data
+    layer is exercised separately by `parse_verilog_data_mux()` against the
+    fixed 9-byte header section.
+    """
     if filepath is None:
         filepath = FPGA_DIR / "usb_data_interface_ft2232h.v"
     text = filepath.read_text()
@@ -454,15 +535,11 @@ def parse_verilog_packet_constants(
             return int(vlog_m.group(1))
         return int(val, 16) if val.startswith("0x") else int(val)
 
-    header_val = _find(r"localparam\s+HEADER\s*=\s*(\d+'h[0-9a-fA-F]+)")
     footer_val = _find(r"localparam\s+FOOTER\s*=\s*(\d+'h[0-9a-fA-F]+)")
     status_hdr = _find(r"localparam\s+STATUS_HEADER\s*=\s*(\d+'h[0-9a-fA-F]+)")
-
-    data_size = _find(r"DATA_PKT_LEN\s*=\s*(\d+'d\d+)")
     status_size = _find(r"STATUS_PKT_LEN\s*=\s*(\d+'d\d+)")
 
     return {
-        "data": PacketConstants(header=header_val, footer=footer_val, size=data_size),
         "status": PacketConstants(header=status_hdr, footer=footer_val, size=status_size),
     }
 
@@ -582,26 +659,35 @@ def parse_verilog_data_mux(
     filepath: Path | None = None,
 ) -> list[DataPacketField]:
     """
-    Parse the data_pkt_byte mux from usb_data_interface_ft2232h.v.
-    Returns fields with byte positions and signal names.
+    Parse the v2 data-frame 9-byte fixed header mux from
+    usb_data_interface_ft2232h.v. Returns fields with byte positions and
+    signal names.
+
+    PR-G replaced the v1 11-byte fixed data packet (combinational
+    ``always @(*) begin case (wr_byte_idx) ... data_pkt_byte = ...``) with
+    a clocked FSM that emits a fixed 9-byte header followed by optional
+    variable-length sections. This parser walks the WR_FRAME_HEADER
+    ``case (wr_byte_idx[3:0]) ... ft_data_out <= ...`` block.
     """
     if filepath is None:
         filepath = FPGA_DIR / "usb_data_interface_ft2232h.v"
     text = filepath.read_text()
 
-    # Find the data mux case block
+    # Find the WR_FRAME_HEADER mux: the case block that drives ft_data_out
+    # from the low 4 bits of the byte index, one assignment per fixed-header
+    # byte (4'd0..4'd8).
     match = re.search(
-        r'always\s+@\(\*\)\s+begin\s+case\s*\(wr_byte_idx\)(.*?)endcase',
+        r'case\s*\(\s*wr_byte_idx\s*\[\s*3\s*:\s*0\s*\]\s*\)(.*?)endcase',
         text, re.DOTALL
     )
     if not match:
-        raise ValueError("Could not find data_pkt_byte mux")
+        raise ValueError("Could not find v2 data-frame header mux")
 
     mux_body = match.group(1)
     entries: list[tuple[int, str]] = []
 
     for m in re.finditer(
-        r"5'd(\d+)\s*:\s*data_pkt_byte\s*=\s*(.+?);",
+        r"4'd(\d+)\s*:\s*ft_data_out\s*<=\s*(.+?);",
         mux_body, re.DOTALL
     ):
         idx = int(m.group(1))

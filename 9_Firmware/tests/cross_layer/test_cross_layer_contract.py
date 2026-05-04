@@ -1,23 +1,21 @@
 """
 Cross-Layer Contract Tests
 ==========================
-Single pytest file orchestrating three tiers of verification:
+Single pytest file orchestrating two tiers of verification:
 
 Tier 1 — Static Contract Parsing:
   Compares Python, Verilog, and C source code at parse-time to catch
   opcode mismatches, bit-width errors, packet constant drift, and
   layout bugs like the status_words[0] 37-bit truncation.
 
-Tier 2 — Verilog Cosimulation (iverilog):
-  Compiles and runs tb_cross_layer_ft2232h.v, then parses its output
-  files (cmd_results.txt, data_packet.txt, status_packet.txt) and
-  runs Python parsers on the captured bytes to verify round-trip
-  correctness.
-
 Tier 3 — C Stub Execution:
   Compiles stm32_settings_stub.cpp, generates a binary settings
   packet from Python, runs the stub, and verifies all parsed field
   values match.
+
+(Tier 2 — Verilog cosimulation — was retired post-PR-G; the v1 TB no
+longer matched production. Equivalent v2 coverage lives in the FPGA
+regression's tb_usb_protocol_v2 and tb_system_opcodes.)
 
 The goal is to find UNKNOWN bugs by testing each layer against
 independently-derived ground truth — not just checking that two
@@ -53,31 +51,20 @@ sys.path.insert(0, str(cp.GUI_DIR))
 # Helpers
 # ===================================================================
 
-IVERILOG = os.environ.get("IVERILOG", "iverilog")
-VVP = os.environ.get("VVP", "vvp")
 CXX = os.environ.get("CXX", "c++")
 
 # Check tool availability for conditional skipping
-_has_iverilog = Path(IVERILOG).exists() if "/" in IVERILOG else bool(
-    subprocess.run(["which", IVERILOG], capture_output=True).returncode == 0
-)
 _has_cxx = subprocess.run(
     [CXX, "--version"], capture_output=True
 ).returncode == 0
 
 # In CI, missing tools must be a hard failure — never silently skip.
 _in_ci = os.environ.get("GITHUB_ACTIONS") == "true"
-if _in_ci:
-    if not _has_iverilog:
-        raise RuntimeError(
-            "iverilog is required in CI but was not found. "
-            "Ensure 'apt-get install iverilog' ran and IVERILOG/VVP are on PATH."
-        )
-    if not _has_cxx:
-        raise RuntimeError(
-            "C++ compiler is required in CI but was not found. "
-            "Ensure build-essential is installed."
-        )
+if _in_ci and not _has_cxx:
+    raise RuntimeError(
+        "C++ compiler is required in CI but was not found. "
+        "Ensure build-essential is installed."
+    )
 
 
 def _strip_cxx_comments_and_strings(src: str) -> str:
@@ -182,6 +169,9 @@ GROUND_TRUTH_OPCODES = {
     0x14: ("host_short_listen_cycles", 16),
     0x15: ("host_chirps_per_elev", 6),
     0x16: ("host_gain_shift", 4),
+    0x17: ("host_medium_chirp_cycles", 16),   # PR-G G2.1
+    0x18: ("host_medium_listen_cycles", 16),  # PR-G G2.1
+    0x19: ("host_subframe_enable", 3),        # PR-U M-8
     0x20: ("host_range_mode", 2),
     0x21: ("host_cfar_guard", 4),
     0x22: ("host_cfar_train", 5),
@@ -195,8 +185,11 @@ GROUND_TRUTH_OPCODES = {
     0x2A: ("host_agc_attack", 4),
     0x2B: ("host_agc_decay", 4),
     0x2C: ("host_agc_holdoff", 4),
+    0x2D: ("host_cfar_alpha_soft", 8),        # PR-G G1
     0x30: ("host_self_test_trigger", 1),  # pulse
     0x31: ("host_status_request", 1),     # pulse
+    0x32: ("host_adc_pwdn", 1),               # PR-R M-3
+    0x33: ("host_adc_format", 2),             # PR-R M-4
     0xFF: ("host_status_request", 1),     # alias, pulse
 }
 
@@ -207,14 +200,22 @@ GROUND_TRUTH_RESET_DEFAULTS = {
     "host_long_chirp_cycles": 3000,
     "host_long_listen_cycles": 13700,
     "host_guard_cycles": 17540,
-    "host_short_chirp_cycles": 50,
-    "host_short_listen_cycles": 17450,
-    "host_chirps_per_elev": 32,
+    # PR-E V2: 1 us chirp / SHORT PRI 175 us (was 0.5 us legacy macros).
+    "host_short_chirp_cycles": 100,
+    "host_short_listen_cycles": 17400,
+    # PR-G G2.1 + PR-Q stagger: MEDIUM PRI 161 us (5 us chirp + 156 us listen).
+    "host_medium_chirp_cycles": 500,
+    "host_medium_listen_cycles": 15600,
+    # PR-U M-8: 3'b111 (SHORT|MEDIUM|LONG all on by default).
+    "host_subframe_enable": 7,
+    # m-6 (PR-S): bumped from 32 in PR-F.
+    "host_chirps_per_elev": 48,
     "host_gain_shift": 0,
     "host_range_mode": 0,
     "host_cfar_guard": 2,
     "host_cfar_train": 8,
     "host_cfar_alpha": 0x30,
+    "host_cfar_alpha_soft": 0x18,           # PR-F — 1.5 in Q4.4
     "host_cfar_mode": 0,
     "host_cfar_enable": 0,
     "host_mti_enable": 0,
@@ -224,11 +225,16 @@ GROUND_TRUTH_RESET_DEFAULTS = {
     "host_agc_attack": 1,
     "host_agc_decay": 1,
     "host_agc_holdoff": 4,
+    "host_adc_pwdn": 0,                     # PR-R M-3 — 1'b0 (ADC powered)
+    "host_adc_format": 0,                   # PR-R M-4 — 2'b00 (offset binary)
 }
 
 GROUND_TRUTH_PACKET_CONSTANTS = {
-    "data": {"header": 0xAA, "footer": 0x55, "size": 11},
-    "status": {"header": 0xBB, "footer": 0x55, "size": 26},
+    # Data packet retired as a fixed-size construct in PR-G (variable-length
+    # bulk frame). Only the status packet still has a single canonical size,
+    # so the cross-layer constants check now scopes to status only. The data
+    # layer is exercised via the 9-byte fixed header in TestTier1DataPacketLayout.
+    "status": {"header": 0xBB, "footer": 0x55, "size": 30},  # PR-G — was 26 in v1
 }
 
 
@@ -425,7 +431,10 @@ class TestTier1PacketConstants:
         """Python and Verilog packet constants must match each other."""
         py = cp.parse_python_packet_constants()
         v = cp.parse_verilog_packet_constants()
-        for ptype in ("data", "status"):
+        # Iterate over whatever the parsers expose. Post-PR-G that is just
+        # the status packet; if a future protocol re-introduces a fixed-size
+        # data packet, both parsers will surface it here automatically.
+        for ptype in py.keys() & v.keys():
             assert py[ptype].header == v[ptype].header
             assert py[ptype].footer == v[ptype].footer
             assert py[ptype].size == v[ptype].size
@@ -1045,23 +1054,32 @@ class TestTier1DataPacketLayout:
     """Verify data packet byte layout matches between Python and Verilog."""
 
     def test_verilog_data_mux_field_positions(self):
-        """Verilog data_pkt_byte mux must have correct byte positions."""
+        """
+        v2 frame header (PR-G): bytes 0-8 are a fixed prefix written by the
+        WR_FRAME_HEADER state. Bytes 0-2 are constants/flags (HEADER,
+        protocol version, flags byte) and the parser skips them. Bytes 3-8
+        carry three 16-bit fields the host needs before it can size the
+        variable sections that follow:
+          bytes 3-4  frame_number_snapshot
+          bytes 5-6  NUM_RANGE_BINS    (= RP_NUM_RANGE_BINS)
+          bytes 7-8  NUM_DOPPLER_BINS  (= RP_NUM_DOPPLER_BINS)
+        """
         v_fields = cp.parse_verilog_data_mux()
-        # Expected: range_profile at bytes 1-4 (32-bit), doppler_real 5-6,
-        #           doppler_imag 7-8, cfar 9
         field_map = {f.name: f for f in v_fields}
 
-        assert "range_profile" in field_map
-        rp = field_map["range_profile"]
-        assert rp.byte_start == 1 and rp.byte_end == 4 and rp.width_bits == 32
+        assert "frame_number_snapshot" in field_map, (
+            f"v2 header byte 3-4 must carry frame_number_snapshot; got {list(field_map)}"
+        )
+        fn = field_map["frame_number_snapshot"]
+        assert fn.byte_start == 3 and fn.byte_end == 4 and fn.width_bits == 16
 
-        assert "doppler_real" in field_map
-        dr = field_map["doppler_real"]
-        assert dr.byte_start == 5 and dr.byte_end == 6 and dr.width_bits == 16
+        assert "NUM_RANGE_BINS" in field_map
+        nr = field_map["NUM_RANGE_BINS"]
+        assert nr.byte_start == 5 and nr.byte_end == 6 and nr.width_bits == 16
 
-        assert "doppler_imag" in field_map
-        di = field_map["doppler_imag"]
-        assert di.byte_start == 7 and di.byte_end == 8 and di.width_bits == 16
+        assert "NUM_DOPPLER_BINS" in field_map
+        nd = field_map["NUM_DOPPLER_BINS"]
+        assert nd.byte_start == 7 and nd.byte_end == 8 and nd.width_bits == 16
 
     def test_python_data_packet_byte_positions(self):
         """Python parse_data_packet byte offsets must be correct."""
@@ -1352,187 +1370,17 @@ class TestTier2Adar1000VmTableGroundTruth:
         )
 
 
-# ===================================================================
-# TIER 2: Verilog Cosimulation
-# ===================================================================
-
-@pytest.mark.skipif(not _has_iverilog, reason="iverilog not available")
-class TestTier2VerilogCosim:
-    """Compile and run the FT2232H TB, validate output against Python parsers."""
-
-    @pytest.fixture(scope="class")
-    def tb_results(self, tmp_path_factory):
-        """Compile and run TB once, return output file contents."""
-        workdir = tmp_path_factory.mktemp("verilog_cosim")
-
-        tb_path = THIS_DIR / "tb_cross_layer_ft2232h.v"
-        rtl_path = cp.FPGA_DIR / "usb_data_interface_ft2232h.v"
-        out_bin = workdir / "tb_cross_layer_ft2232h"
-
-        # Compile
-        result = subprocess.run(
-            [IVERILOG, "-o", str(out_bin), "-I", str(cp.FPGA_DIR),
-             str(tb_path), str(rtl_path)],
-            capture_output=True, text=True, timeout=30,
-        )
-        assert result.returncode == 0, f"iverilog compile failed:\n{result.stderr}"
-
-        # Run
-        result = subprocess.run(
-            [VVP, str(out_bin)],
-            capture_output=True, text=True, timeout=60,
-            cwd=str(workdir),
-        )
-        assert result.returncode == 0, f"vvp failed:\n{result.stderr}"
-
-        # Parse output
-        return {
-            "stdout": result.stdout,
-            "cmd_results": (workdir / "cmd_results.txt").read_text(),
-            "data_packet": (workdir / "data_packet.txt").read_text(),
-            "status_packet": (workdir / "status_packet.txt").read_text(),
-        }
-
-    def test_all_tb_tests_pass(self, tb_results):
-        """All Verilog TB internal checks must pass."""
-        stdout = tb_results["stdout"]
-        assert "ALL TESTS PASSED" in stdout, f"TB had failures:\n{stdout}"
-
-    def test_command_round_trip(self, tb_results):
-        """Verify every command decoded correctly by matching sent vs received."""
-        rows = _parse_hex_results(tb_results["cmd_results"])
-        assert len(rows) >= 20, f"Expected >= 20 command results, got {len(rows)}"
-
-        for row in rows:
-            assert len(row) == 6, f"Bad row format: {row}"
-            sent_op, sent_addr, sent_val = row[0], row[1], row[2]
-            got_op, got_addr, got_val = row[3], row[4], row[5]
-            assert sent_op == got_op, (
-                f"Opcode mismatch: sent 0x{sent_op} got 0x{got_op}"
-            )
-            assert sent_addr == got_addr, (
-                f"Addr mismatch: sent 0x{sent_addr} got 0x{got_addr}"
-            )
-            assert sent_val == got_val, (
-                f"Value mismatch: sent 0x{sent_val} got 0x{got_val}"
-            )
-
-    def test_data_packet_python_round_trip(self, tb_results):
-        """
-        Take the 11 bytes captured by the Verilog TB, run Python's
-        parse_data_packet() on them, verify the parsed values match
-        what was injected into the TB.
-        """
-        from radar_protocol import RadarProtocol
-
-        rows = _parse_hex_results(tb_results["data_packet"])
-        assert len(rows) == 11, f"Expected 11 data packet bytes, got {len(rows)}"
-
-        # Reconstruct raw bytes
-        raw = bytes(int(row[1], 16) for row in rows)
-        assert len(raw) == 11
-
-        parsed = RadarProtocol.parse_data_packet(raw)
-        assert parsed is not None, "parse_data_packet returned None"
-
-        # The TB injected: range_profile = 0xCAFE_BEEF = {Q=0xCAFE, I=0xBEEF}
-        #   doppler_real = 0x1234, doppler_imag = 0x5678
-        #   cfar_detection = 1
-        #
-        # range_q = 0xCAFE → signed = 0xCAFE - 0x10000 = -13570
-        # range_i = 0xBEEF → signed = 0xBEEF - 0x10000 = -16657
-        # doppler_i = 0x1234 → signed = 4660
-        # doppler_q = 0x5678 → signed = 22136
-
-        assert parsed["range_q"] == (0xCAFE - 0x10000), (
-            f"range_q: {parsed['range_q']} != {0xCAFE - 0x10000}"
-        )
-        assert parsed["range_i"] == (0xBEEF - 0x10000), (
-            f"range_i: {parsed['range_i']} != {0xBEEF - 0x10000}"
-        )
-        assert parsed["doppler_i"] == 0x1234, (
-            f"doppler_i: {parsed['doppler_i']} != {0x1234}"
-        )
-        assert parsed["doppler_q"] == 0x5678, (
-            f"doppler_q: {parsed['doppler_q']} != {0x5678}"
-        )
-        assert parsed["detection"] == 1, (
-            f"detection: {parsed['detection']} != 1"
-        )
-
-    def test_status_packet_python_round_trip(self, tb_results):
-        """
-        Take the 26 bytes captured by the Verilog TB, run Python's
-        parse_status_packet() on them, verify against injected values.
-        """
-        from radar_protocol import RadarProtocol
-
-        lines = tb_results["status_packet"].strip().splitlines()
-        # Filter out comments and status_words debug lines
-        rows = []
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            rows.append(line.split())
-
-        assert len(rows) == 26, f"Expected 26 status bytes, got {len(rows)}"
-
-        raw = bytes(int(row[1], 16) for row in rows)
-        assert len(raw) == 26
-
-        sr = RadarProtocol.parse_status_packet(raw)
-        assert sr is not None, "parse_status_packet returned None"
-
-        # Injected values (from TB):
-        #   status_cfar_threshold = 0xABCD
-        #   status_stream_ctrl = 3'b101 = 5
-        #   status_radar_mode = 2'b11 = 3
-        #   status_long_chirp = 0x1234
-        #   status_long_listen = 0x5678
-        #   status_guard = 0x9ABC
-        #   status_short_chirp = 0xDEF0
-        #   status_short_listen = 0xFACE
-        #   status_chirps_per_elev = 42
-        #   status_range_mode = 2'b10 = 2
-        #   status_self_test_flags = 5'b10101 = 21
-        #   status_self_test_detail = 0xA5
-        #   status_self_test_busy = 1
-        #   status_agc_current_gain = 7
-        #   status_agc_peak_magnitude = 200
-        #   status_agc_saturation_count = 15
-        #   status_agc_enable = 1
-
-        # Words 1-5 should be correct (no truncation bug)
-        assert sr.cfar_threshold == 0xABCD, f"cfar_threshold: 0x{sr.cfar_threshold:04X}"
-        assert sr.long_chirp == 0x1234, f"long_chirp: 0x{sr.long_chirp:04X}"
-        assert sr.long_listen == 0x5678, f"long_listen: 0x{sr.long_listen:04X}"
-        assert sr.guard == 0x9ABC, f"guard: 0x{sr.guard:04X}"
-        assert sr.short_chirp == 0xDEF0, f"short_chirp: 0x{sr.short_chirp:04X}"
-        assert sr.short_listen == 0xFACE, f"short_listen: 0x{sr.short_listen:04X}"
-        assert sr.chirps_per_elev == 42, f"chirps_per_elev: {sr.chirps_per_elev}"
-        assert sr.range_mode == 2, f"range_mode: {sr.range_mode}"
-        assert sr.self_test_flags == 21, f"self_test_flags: {sr.self_test_flags}"
-        assert sr.self_test_detail == 0xA5, f"self_test_detail: 0x{sr.self_test_detail:02X}"
-        assert sr.self_test_busy == 1, f"self_test_busy: {sr.self_test_busy}"
-
-        # AGC fields (word 4)
-        assert sr.agc_current_gain == 7, f"agc_current_gain: {sr.agc_current_gain}"
-        assert sr.agc_peak_magnitude == 200, f"agc_peak_magnitude: {sr.agc_peak_magnitude}"
-        assert sr.agc_saturation_count == 15, f"agc_saturation_count: {sr.agc_saturation_count}"
-        assert sr.agc_enable == 1, f"agc_enable: {sr.agc_enable}"
-
-        # Word 0: stream_ctrl should be 5 (3'b101)
-        assert sr.stream_ctrl == 5, (
-            f"stream_ctrl: {sr.stream_ctrl} != 5. "
-            f"Check status_words[0] bit positions."
-        )
-
-        # radar_mode should be 3 (2'b11)
-        assert sr.radar_mode == 3, (
-            f"radar_mode={sr.radar_mode} != 3. "
-            f"Check status_words[0] bit positions."
-        )
+# Tier 2 Verilog cosimulation (was tb_cross_layer_ft2232h.v) was retired
+# after PR-G v2: the v1 11-byte fixed data packet, 26-byte status packet,
+# and `cfar_detection` 1-bit input it exercised no longer exist on the
+# production module. Equivalent and stronger v2 coverage now lives in the
+# FPGA regression: `tb_usb_protocol_v2` (PR-G frame header v2, 30-byte
+# status with soft tier, FSM length consistency, MEDIUM ladder opcodes
+# 0x17/0x18 round-trip, opcode 0x2D byte-order) and `tb_system_opcodes`
+# (every host opcode dispatched through the FT2232H 4-cycle read FSM at
+# the radar_system_top integration level). Per-byte v2 header layout is
+# checked statically here by TestTier1DataPacketLayout against the actual
+# `case (wr_byte_idx[3:0])` in usb_data_interface_ft2232h.v.
 
 
 # ===================================================================
