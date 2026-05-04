@@ -1479,8 +1479,13 @@ static int configure_ad9523(void)
     pdata.refb_diff_rcv_en = 0;  // REFB 100 MHz single-ended
     pdata.osc_in_diff_en = 0;
 
-    // PLL1: keep bypass disabled so VCXO can be used as reference cleanup if desired
-    pdata.pll1_bypass_en = 0;
+    // PLL1: bypassed for first bring-up — VCXO free-runs. ad9523_status()
+    // skips PLL1/REFA/REFB checks (ad9523.c:262 gates on pll1_bypass_en==0).
+    // F-4.3/4.4 deferred: switching to bypass=0 (PLL1 active, VCXO
+    // disciplined to OCXO REFB) requires pll1_charge_pump_current_nA and
+    // pll1_loop_filter_rzero values tuned against the actual VCXO Kvco
+    // and loop-filter network — design after bench-verified OCXO + VCXO.
+    pdata.pll1_bypass_en = 1;
     pdata.refa_r_div = 1;
     pdata.refb_r_div = 1;
 
