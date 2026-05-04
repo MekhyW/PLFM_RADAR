@@ -1423,6 +1423,43 @@ static int configure_ad9523(void)
     static struct ad9523_platform_data pdata;
     memset(&pdata, 0, sizeof(pdata));
 
+    // Channels array (must allocate AD9523_NUM_CHAN entries) — assigned to
+    // pdata BEFORE ad9523_init() so its per-channel default loop iterates
+    // over the right num_channels.
+    static struct ad9523_channel_spec channels[AD9523_NUM_CHAN];
+    pdata.channels = channels;
+    pdata.num_channels = AD9523_NUM_CHAN;
+
+    // Fill ad9523 init param
+    struct ad9523_init_param init_param;
+    memset(&init_param, 0, sizeof(init_param));
+
+    // SPI init (no_os type)
+    init_param.spi_init.max_speed_hz = 10000000; // 10 MHz SPI
+    init_param.spi_init.chip_select = 0;
+    init_param.spi_init.mode = NO_OS_SPI_MODE_0;
+    init_param.spi_init.platform_ops = &stm32_spi_ops;
+    init_param.spi_init.extra = &hspi4; // pass HAL handle via extra
+
+    init_param.pdata = &pdata;
+
+    // F-4.1: ad9523_init() unconditionally overwrites every field in pdata
+    // (vcxo_freq=0, pll1_bypass_en=1, pll2_ndiv_b_cnt=4, every channel
+    // field). Call it BEFORE the user overrides below. The previous
+    // "customize → init → setup" ordering wiped every user value and left
+    // PLL2 N=16 (target VCO 1.6 GHz, far below the 3.6-4.0 GHz band) →
+    // PLL2 never locked → boot halted. This call seeds defaults; user
+    // overrides land on top.
+    DIAG("CLK", "Calling ad9523_init() -- seeds pdata defaults (must precede overrides)");
+    {
+        int32_t init_ret = ad9523_init(&init_param);
+        DIAG("CLK", "ad9523_init() returned %ld", (long)init_ret);
+        if (init_ret != 0) {
+            DIAG_ERR("CLK", "ad9523_init() FAILED (ret=%ld)", (long)init_ret);
+            return -1;
+        }
+    }
+
     // VCXO + refs
     pdata.vcxo_freq = 100000000; // 100 MHz VCXO on OSC_IN
     pdata.refa_diff_rcv_en = 0;  // REFA 10 MHz single-ended
@@ -1438,18 +1475,22 @@ static int configure_ad9523(void)
     pdata.pll2_ndiv_a_cnt = 0;
     pdata.pll2_ndiv_b_cnt = 9; // 4*9 + 0 = 36
     pdata.pll2_r2_div = 0;     // R2=1
-    pdata.pll2_charge_pump_current_nA = 3500; // example
+    pdata.pll2_charge_pump_current_nA = 3500;
+
+    // F-4.2 + F-4.7: AD9523 OUT4-OUT9 source from M1 or M2 only (no VCO
+    // direct path); M1/M2 ∈ {3,4,5}. m1=0 (memset/init default) sets
+    // M1_PWR_DOWN_EN, killing channels 4-9. With m1=3 and VCO 3.6 GHz,
+    // M1 output = 1.2 GHz; channel dividers below operate on this. m1=3
+    // is the unique choice for the labelled frequency set (m1=4 fails
+    // OUT4=400MHz; m1=5 fails OUT0/1=300MHz).
+    pdata.pll2_vco_diff_m1 = 3;
+    pdata.pll2_vco_diff_m2 = 3;
 
     // Loop filters: reasonable starting values from examples
     pdata.rpole2 = RPOLE2_900_OHM;
     pdata.rzero = RZERO_2000_OHM;
     pdata.cpole1 = CPOLE1_24_PF;
     pdata.rzero_bypass_en = 0;
-
-    // Channels array (must allocate AD9523_NUM_CHAN entries)
-    static struct ad9523_channel_spec channels[AD9523_NUM_CHAN];
-    pdata.channels = channels;
-    pdata.num_channels = AD9523_NUM_CHAN;
 
     // Initialize channels to disabled defaults
     for (int i=0; i<AD9523_NUM_CHAN; ++i) {
@@ -1461,100 +1502,76 @@ static int configure_ad9523(void)
         channels[i].output_dis = 1;
     }
 
-    // Map your required outputs (3.6 GHz PLL2)
-    // OUT0 = ADF4382A_TX= 300 MHz LVDS ( /12 )
-    channels[0].channel_divider = 12;
+    // Map your required outputs (VCO=3.6 GHz, m1=3 → M1 output 1.2 GHz)
+    // OUT0 = ADF4382A_TX = 300 MHz LVDS (1.2 GHz / 4)
+    channels[0].channel_divider = 4;
     channels[0].driver_mode = LVDS_7mA;
     channels[0].divider_phase = 0;
     channels[0].output_dis = 0;
 
     // OUT1 = ADF4382A_RX = 300 MHz LVDS (phase aligned with OUT0)
-    channels[1].channel_divider = 12;
+    channels[1].channel_divider = 4;
     channels[1].driver_mode = LVDS_7mA;
     channels[1].divider_phase = 0;
     channels[1].output_dis = 0;
 
-    // OUT4 = ADC = 400 MHz LVDS ( /9 )
-    channels[4].channel_divider = 9;
+    // OUT4 = ADC = 400 MHz LVDS (1.2 GHz / 3)
+    channels[4].channel_divider = 3;
     channels[4].driver_mode = LVDS_7mA;
     channels[4].divider_phase = 0;
     channels[4].output_dis = 0;
 
     // OUT5 = FPGA_ADC = 400 MHz LVDS (phase aligned with OUT4)
-    channels[5].channel_divider = 9;
+    channels[5].channel_divider = 3;
     channels[5].driver_mode = LVDS_7mA;
     channels[5].divider_phase = 0;
     channels[5].output_dis = 0;
 
-    // OUT6 = FPGA_SYSTEM_CLOCK = 100 MHz LVCMOS ( /36 )
-    channels[6].channel_divider = 36;
+    // OUT6 = FPGA_SYSTEM_CLOCK = 100 MHz LVCMOS (1.2 GHz / 12)
+    channels[6].channel_divider = 12;
     channels[6].driver_mode = CMOS_CONF1;
     channels[6].divider_phase = 0;
     channels[6].output_dis = 0;
 
-    // OUT7 = FPGA_TEST_CLOCK = 20 MHz LVCMOS ( /180 )
-    channels[7].channel_divider = 180;
+    // OUT7 = FPGA_TEST_CLOCK = 20 MHz LVCMOS (1.2 GHz / 60)
+    channels[7].channel_divider = 60;
     channels[7].driver_mode = CMOS_CONF1;
     channels[7].divider_phase = 0;
     channels[7].output_dis = 0;
 
-    // OUT8 = SYNC_TX = 60 MHz LVDS ( /60 )
-    channels[8].channel_divider = 60;
+    // OUT8 = SYNC_TX = 60 MHz LVDS (1.2 GHz / 20)
+    channels[8].channel_divider = 20;
     channels[8].driver_mode = LVDS_4mA;
     channels[8].divider_phase = 0;
     channels[8].output_dis = 0;
 
     // OUT9 = SYNC_RX = 60 MHz LVDS (phase aligned with OUT8)
-    channels[9].channel_divider = 60;
+    channels[9].channel_divider = 20;
     channels[9].driver_mode = LVDS_4mA;
     channels[9].divider_phase = 0;
     channels[9].output_dis = 0;
 
-    // OUT10 = DAC = 120 MHz LVCMOS ( /30 )
-    channels[10].channel_divider = 30;
+    // OUT10 = DAC = 120 MHz LVCMOS (1.2 GHz / 10)
+    channels[10].channel_divider = 10;
     channels[10].driver_mode = CMOS_CONF1;
     channels[10].divider_phase = 0;
     channels[10].output_dis = 0;
 
     // OUT11 = FPGA_DAC = 120 MHz LVCMOS (phase aligned with OUT10)
-    channels[11].channel_divider = 30;
+    channels[11].channel_divider = 10;
     channels[11].driver_mode = CMOS_CONF1;
     channels[11].divider_phase = 0;
     channels[11].output_dis = 0;
 
-    // Fill ad9523 init param
-    struct ad9523_init_param init_param;
-    memset(&init_param, 0, sizeof(init_param));
-
-    // SPI init (no_os type)
-    init_param.spi_init.max_speed_hz = 10000000; // 10 MHz SPI
-    init_param.spi_init.chip_select = 0;
-    init_param.spi_init.mode = NO_OS_SPI_MODE_0;
-    init_param.spi_init.platform_ops = &stm32_spi_ops;
-    init_param.spi_init.extra = &hspi4; // pass HAL handle via extra
-
-
-    init_param.pdata = &pdata;
-
     DIAG_SECTION("AD9523 CONFIGURE");
-    DIAG("CLK", "VCXO=%lu Hz, PLL2 N=%d (4*%d+%d)=%d, R2=%d",
+    DIAG("CLK", "VCXO=%lu Hz, PLL2 N=%d (4*%d+%d)=%d, R2=%d, m1=%d -> VCO 3.6 GHz, M1 1.2 GHz",
          (unsigned long)pdata.vcxo_freq,
          4 * pdata.pll2_ndiv_b_cnt + pdata.pll2_ndiv_a_cnt,
          pdata.pll2_ndiv_b_cnt, pdata.pll2_ndiv_a_cnt,
          4 * pdata.pll2_ndiv_b_cnt + pdata.pll2_ndiv_a_cnt,
-         pdata.pll2_r2_div);
-    DIAG("CLK", "Enabled channels: 0,1(/12=300M) 4,5(/9=400M) 6(/36=100M) 7(/180=20M) 8,9(/60=60M) 10,11(/30=120M)");
-
-    // init ad9523 defaults (fills any missing pdata defaults)
-    DIAG("CLK", "Calling ad9523_init() -- fills pdata defaults");
-    {
-        int32_t init_ret = ad9523_init(&init_param);
-        DIAG("CLK", "ad9523_init() returned %ld", (long)init_ret);
-        if (init_ret != 0) {
-            DIAG_ERR("CLK", "ad9523_init() FAILED (ret=%ld)", (long)init_ret);
-            return -1;
-        }
-    }
+         pdata.pll2_r2_div,
+         pdata.pll2_vco_diff_m1);
+    DIAG("CLK", "Enabled channels: 0,1(/4=300M) 4,5(/3=400M) 6(/12=100M) 7(/60=20M) 8,9(/20=60M) 10,11(/10=120M)");
 
     /* [Bug #2 FIXED] Removed first ad9523_setup() call that was here.
      * It wrote to the chip while still in reset — writes were lost.
