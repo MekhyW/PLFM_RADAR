@@ -15,27 +15,6 @@ public:
         RX = 1
     };
 
-    struct BeamConfig {
-        float angle_degrees;
-        uint8_t phase_settings[4];
-        uint8_t gain_settings[4];
-        uint32_t dwell_time_ms;
-
-        BeamConfig() : angle_degrees(0), dwell_time_ms(100) {
-            for(int i = 0; i < 4; i++) {
-                phase_settings[i] = 0;
-                gain_settings[i] = 0x7F;
-            }
-        }
-
-        BeamConfig(float angle, uint32_t dwell = 100) : angle_degrees(angle), dwell_time_ms(dwell) {
-            for(int i = 0; i < 4; i++) {
-                phase_settings[i] = 0;
-                gain_settings[i] = 0x7F;
-            }
-        }
-    };
-
     ADAR1000Manager();
     ~ADAR1000Manager();
 
@@ -48,30 +27,14 @@ public:
     // Mode Switching
     void switchToTXMode();
     void switchToRXMode();
-    // fastTXMode/fastRXMode/pulseTXMode/pulseRXMode were removed: per-chirp T/R
-    // switching is owned by the FPGA (plfm_chirp_controller -> adar_tr_x pins,
-    // requires TR_SOURCE=1 in REG_SW_CONTROL, set in initializeSingleDevice).
-    // The old SPI RMW path was architecturally redundant and also toggled the
-    // wrong bit (TR_SOURCE instead of TR_SPI). See PR for details.
 
     // Beam Steering
-    bool setBeamAngle(float angle_degrees, BeamDirection direction);
-    bool setCustomBeamPattern(const uint8_t phase_settings[16], const uint8_t gain_settings[4], BeamDirection direction);
     bool setCustomBeamPattern16(const uint8_t phase_pattern[16], BeamDirection direction);
-
-    // Beam Sweeping
-    void startBeamSweeping();
-    void stopBeamSweeping();
-    void updateBeamPosition();
-    void setBeamSequence(const std::vector<BeamConfig>& sequence, BeamDirection direction);
-    void clearBeamSequence(BeamDirection direction);
 
     // Device Control
     bool setAllDevicesTXMode();
     bool setAllDevicesRXMode();
     void setADTR1107Mode(BeamDirection direction);
-    // setADTR1107Control removed -- it only wrapped the now-deleted
-    // setTRSwitchPosition SPI path. FPGA drives the TR pin directly.
 
     // Monitoring and Diagnostics
     float readTemperature(uint8_t deviceIndex);
@@ -79,47 +42,18 @@ public:
     uint8_t readRegister(uint8_t deviceIndex, uint32_t address);
     void writeRegister(uint8_t deviceIndex, uint32_t address, uint8_t value);
 
-    // Configuration
-    // setSwitchSettlingTime / setFastSwitchMode removed: their only reader was
-    // the deleted setADTR1107Control SPI path, and setFastSwitchMode(true)
-    // also bundled a datasheet-violating PA+LNA-biased-simultaneously side
-    // effect. Per-chirp settling is now FPGA-owned. Callers that need a
-    // warm-up bias state should use switchToTXMode / switchToRXMode instead.
-    void setBeamDwellTime(uint32_t ms);
-
-    // Getters
-    bool isBeamSweepingActive() const { return beam_sweeping_active_; }
-    uint8_t getCurrentBeamIndex() const { return current_beam_index_; }
-    BeamDirection getCurrentMode() const { return current_mode_; }
-    uint32_t getLastSwitchTime() const { return last_switch_time_us_; }
-
     struct ADAR1000Device {
         uint8_t dev_addr;
         bool initialized;
-        BeamDirection current_mode;
         float temperature;
 
         ADAR1000Device(uint8_t addr)
-            : dev_addr(addr), initialized(false), current_mode(BeamDirection::RX), temperature(25.0f) {
+            : dev_addr(addr), initialized(false), temperature(25.0f) {
         }
     };
 
-    // Configuration
-    // fast_switch_mode_ / switch_settling_time_us_ removed: both had no
-    // readers after the FPGA-owned TR refactor.
-    uint32_t beam_dwell_time_ms_ = 100;
-    uint32_t last_switch_time_us_ = 0;
-
     // Device Management
     std::vector<std::unique_ptr<ADAR1000Device>> devices_;
-    BeamDirection current_mode_ = BeamDirection::RX;
-
-    // Beam Sweeping
-    std::vector<BeamConfig> tx_beam_sequence_;
-    std::vector<BeamConfig> rx_beam_sequence_;
-    uint8_t current_beam_index_ = 0;
-    bool beam_sweeping_active_ = false;
-    uint32_t last_beam_update_time_ = 0;
 
     // Vector Modulator lookup tables (see ADAR1000_Manager.cpp for provenance).
     // Indexed as VM_*[phase % 128] on a uniform 2.8125 deg grid.
@@ -143,7 +77,11 @@ public:
     // Private Methods
     bool initializeSingleDevice(uint8_t deviceIndex);
     bool initializeADTR1107Sequence();
-    void calculatePhaseSettings(float angle_degrees, uint8_t phase_settings[4]);
+    // Re-emit ADTR1107 LNA-off + PA-safe + PA-Idq-cal bias values AFTER
+    // initializeAllDevices() has run its soft-reset-then-init flow. The soft
+    // reset wipes any bias values set before it, so this MUST be called
+    // post-init for the ADTR1107 driver to land at the Idq-tuned bias point.
+    bool applyADTRBiasDefaults();
     void delayUs(uint32_t microseconds);
 
     // Power Management
@@ -172,7 +110,6 @@ public:
     void adarSetTxVgaGain(uint8_t deviceIndex, uint8_t channel, uint8_t gain, uint8_t broadcast);
     void adarSetTxBias(uint8_t deviceIndex, uint8_t broadcast);
     uint8_t adarAdcRead(uint8_t deviceIndex, uint8_t broadcast);
-    // setTRSwitchPosition removed -- FPGA owns TR pin. See PR.
 
 private:
 

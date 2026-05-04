@@ -73,8 +73,7 @@ void ADAR1000_AGC::update(bool fpga_saturation)
 // ---------------------------------------------------------------------------
 // applyGain -- write effective gain to all 16 RX VGA channels
 //
-// Uses the Manager's adarSetRxVgaGain which takes 1-based channel indices
-// (matching the convention in setBeamAngle).
+// Uses the Manager's adarSetRxVgaGain which takes 1-based channel indices.
 // ---------------------------------------------------------------------------
 void ADAR1000_AGC::applyGain(ADAR1000Manager &mgr)
 {

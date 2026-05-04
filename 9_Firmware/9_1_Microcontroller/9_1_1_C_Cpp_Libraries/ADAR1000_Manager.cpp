@@ -163,19 +163,14 @@ void ADAR1000Manager::switchToTXMode() {
     DIAG("BF", "Step 3: PA bias ON");
     setPABias(true);
     delayUs(50);
-    // Step 4 (former setADTR1107Control(true)) removed: TR pin is FPGA-owned.
-    // Chip follows adar_tr_x; TX path is asserted by the FPGA chirp FSM, not
-    // by SPI here. Write per-channel TX enables so the FPGA TR override has
-    // something to gate.
-
+    /* TR pin is FPGA-owned (adar_tr_x); chirp FSM asserts TX path. We write
+     * per-channel TX enables so the FPGA TR override has something to gate. */
     for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
         adarWrite(dev, REG_RX_ENABLES, 0x00, BROADCAST_OFF);
         adarWrite(dev, REG_TX_ENABLES, 0x0F, BROADCAST_OFF);
         adarSetTxBias(dev, BROADCAST_OFF);
-        devices_[dev]->current_mode = BeamDirection::TX;
         DIAG("BF", "  dev[%u] TX enables=0x0F, TX bias set", dev);
     }
-    current_mode_ = BeamDirection::TX;
     DIAG("BF", "switchToTXMode() complete");
 }
 
@@ -187,117 +182,19 @@ void ADAR1000Manager::switchToRXMode() {
     DIAG("BF", "Step 2: Disable PA supplies");
     disablePASupplies();
     delayUs(10);
-    // Step 3 (former setADTR1107Control(false)) removed: FPGA owns TR pin.
-    DIAG("BF", "Step 4: Enable LNA supplies");
+    DIAG("BF", "Step 3: Enable LNA supplies");
     enableLNASupplies();
     delayUs(50);
-    DIAG("BF", "Step 5: LNA bias ON");
+    DIAG("BF", "Step 4: LNA bias ON");
     setLNABias(true);
     delayUs(50);
 
     for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
         adarWrite(dev, REG_TX_ENABLES, 0x00, BROADCAST_OFF);
         adarWrite(dev, REG_RX_ENABLES, 0x0F, BROADCAST_OFF);
-        devices_[dev]->current_mode = BeamDirection::RX;
         DIAG("BF", "  dev[%u] RX enables=0x0F", dev);
     }
-    current_mode_ = BeamDirection::RX;
     DIAG("BF", "switchToRXMode() complete");
-}
-
-// fastTXMode, fastRXMode, pulseTXMode, pulseRXMode: REMOVED.
-// The chirp hot path owns T/R switching via the FPGA adar_tr_x pins
-// (see 9_Firmware/9_2_FPGA/plfm_chirp_controller.v). The old SPI-RMW per
-// chirp was architecturally redundant, raced the FPGA, and toggled the
-// wrong bit of REG_SW_CONTROL (TR_SOURCE instead of TR_SPI).
-
-// Beam Steering
-bool ADAR1000Manager::setBeamAngle(float angle_degrees, BeamDirection direction) {
-    DIAG("BF", "setBeamAngle(%.1f deg, %s)", (double)angle_degrees,
-         direction == BeamDirection::TX ? "TX" : "RX");
-    uint8_t phase_settings[4];
-    calculatePhaseSettings(angle_degrees, phase_settings);
-    DIAG("BF", "  phase[0..3] = %u, %u, %u, %u",
-         phase_settings[0], phase_settings[1], phase_settings[2], phase_settings[3]);
-
-    if (direction == BeamDirection::TX) {
-        setAllDevicesTXMode();
-    } else {
-        setAllDevicesRXMode();
-    }
-
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        for (uint8_t ch = 0; ch < 4; ++ch) {
-            if (direction == BeamDirection::TX) {
-                adarSetTxPhase(dev, ch + 1, phase_settings[ch], BROADCAST_OFF);
-                adarSetTxVgaGain(dev, ch + 1, kDefaultTxVgaGain, BROADCAST_OFF);
-            } else {
-                adarSetRxPhase(dev, ch + 1, phase_settings[ch], BROADCAST_OFF);
-                adarSetRxVgaGain(dev, ch + 1, kDefaultRxVgaGain, BROADCAST_OFF);
-            }
-        }
-    }
-    return true;
-}
-
-bool ADAR1000Manager::setCustomBeamPattern(const uint8_t phase_settings[4], const uint8_t gain_settings[4], BeamDirection direction) {
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        for (uint8_t ch = 0; ch < 4; ++ch) {
-            if (direction == BeamDirection::TX) {
-                adarSetTxPhase(dev, ch + 1, phase_settings[ch], BROADCAST_OFF);
-                adarSetTxVgaGain(dev, ch + 1, gain_settings[ch], BROADCAST_OFF);
-            } else {
-                adarSetRxPhase(dev, ch + 1, phase_settings[ch], BROADCAST_OFF);
-                adarSetRxVgaGain(dev, ch + 1, gain_settings[ch], BROADCAST_OFF);
-            }
-        }
-    }
-    return true;
-}
-
-// Beam Sweeping
-void ADAR1000Manager::startBeamSweeping() {
-    beam_sweeping_active_ = true;
-    current_beam_index_ = 0;
-    last_beam_update_time_ = HAL_GetTick();
-}
-
-void ADAR1000Manager::stopBeamSweeping() {
-    beam_sweeping_active_ = false;
-}
-
-void ADAR1000Manager::updateBeamPosition() {
-    if (!beam_sweeping_active_) return;
-
-    uint32_t current_time = HAL_GetTick();
-    const std::vector<BeamConfig>& sequence =
-        (current_mode_ == BeamDirection::TX) ? tx_beam_sequence_ : rx_beam_sequence_;
-
-    if (sequence.empty()) return;
-
-    if (current_time - last_beam_update_time_ >= beam_dwell_time_ms_) {
-        const BeamConfig& beam = sequence[current_beam_index_];
-        setCustomBeamPattern(beam.phase_settings, beam.gain_settings, current_mode_);
-
-        current_beam_index_ = (current_beam_index_ + 1) % sequence.size();
-        last_beam_update_time_ = current_time;
-    }
-}
-
-void ADAR1000Manager::setBeamSequence(const std::vector<BeamConfig>& sequence, BeamDirection direction) {
-    if (direction == BeamDirection::TX) {
-        tx_beam_sequence_ = sequence;
-    } else {
-        rx_beam_sequence_ = sequence;
-    }
-}
-
-void ADAR1000Manager::clearBeamSequence(BeamDirection direction) {
-    if (direction == BeamDirection::TX) {
-        tx_beam_sequence_.clear();
-    } else {
-        rx_beam_sequence_.clear();
-    }
 }
 
 // Monitoring and Diagnostics
@@ -339,22 +236,6 @@ uint8_t ADAR1000Manager::readRegister(uint8_t deviceIndex, uint32_t address) {
 void ADAR1000Manager::writeRegister(uint8_t deviceIndex, uint32_t address, uint8_t value) {
     adarWrite(deviceIndex, address, value, BROADCAST_OFF);
 }
-
-// Configuration
-// setSwitchSettlingTime, setFastSwitchMode: REMOVED.
-// Their only reader was the deleted setADTR1107Control; setFastSwitchMode(true)
-// also violated the ADTR1107 datasheet bias sequence (PA + LNA biased to
-// operational simultaneously). Per-chirp T/R is FPGA-owned now.
-
-void ADAR1000Manager::setBeamDwellTime(uint32_t ms) {
-    beam_dwell_time_ms_ = ms;
-}
-
-// Private helper methods (implementation continues...)
-// ... include all the private method implementations from your original file
-// ============================================================================
-// PRIVATE HELPER METHODS - Add these to the end of ADAR1000_Manager.cpp
-// ============================================================================
 
 bool ADAR1000Manager::initializeAllDevices() {
     DIAG_SECTION("BF INIT ALL DEVICES");
@@ -412,90 +293,113 @@ bool ADAR1000Manager::initializeSingleDevice(uint8_t deviceIndex) {
         return false;
     }
 
+    // Initialize per-channel VGA gains to known defaults. POR leaves these
+    // undefined; without an explicit write, TX channels would not radiate at
+    // their nominal level and the AGC loop would have no known RX baseline to
+    // stride from. AGC overwrites RX gain dynamically once enabled; TX gain
+    // stays at this baseline (production has no per-channel TX gain loop).
+    DIAG("BF", "  dev[%u] init VGA gains (TX=0x%02X, RX=%u)",
+         deviceIndex, kDefaultTxVgaGain, kDefaultRxVgaGain);
+    for (uint8_t ch = 0; ch < 4; ++ch) {
+        adarSetTxVgaGain(deviceIndex, ch + 1, kDefaultTxVgaGain, BROADCAST_OFF);
+        adarSetRxVgaGain(deviceIndex, ch + 1, kDefaultRxVgaGain, BROADCAST_OFF);
+    }
+
     devices_[deviceIndex]->initialized = true;
     return true;
 }
 
 bool ADAR1000Manager::initializeADTR1107Sequence() {
-    DIAG_SECTION("ADTR1107 POWER SEQUENCE (9-step)");
+    /* GPIO + power-rail steps only. The original 9-step datasheet sequence
+     * also wrote ADAR1000 LNA/PA bias registers (Steps 5/7/9) before the
+     * ADAR soft reset later wiped them — those writes are now in
+     * applyADTRBiasDefaults(), called AFTER initializeAllDevices(). Step 8
+     * (enablePASupplies) is left here so the PA rail tracks the original
+     * bring-up order; the soft-reset window with PA rail ON and bias regs
+     * at POR-default 0V is bounded by setAllDevicesTXMode() at the end of
+     * initializeAllDevices() writing kPaBiasOperational and the subsequent
+     * applyADTRBiasDefaults() trim. See F-1.7 in the startup audit memory. */
+    DIAG_SECTION("ADTR1107 POWER SEQUENCE (rails + supplies)");
     uint32_t t0 = HAL_GetTick();
 
-	//Powering up ADTR1107 TX mode
     const uint8_t msg[] = "Starting ADTR1107 Power Sequence...\r\n";
     HAL_UART_Transmit(&huart3, msg, sizeof(msg) - 1, 1000);
 
-    // Step 1: Connect all GND pins to ground (assumed in hardware)
+    // Step 1: GND pins assumed in hardware.
     DIAG("BF", "Step 1: GND pins (hardware -- assumed connected)");
 
-    // Step 2: Set VDD_SW to 3.3V
+    // Step 2: VDD_SW -> 3.3V
     DIAG("BF", "Step 2: VDD_SW -> 3.3V");
     HAL_GPIO_WritePin(EN_P_3V3_VDD_SW_GPIO_Port, EN_P_3V3_VDD_SW_Pin, GPIO_PIN_SET);
     HAL_Delay(1);
 
-    // Step 3: Set VSS_SW to -3.3V
+    // Step 3: VSS_SW -> -3.3V
     DIAG("BF", "Step 3: VSS_SW -> -3.3V");
     HAL_GPIO_WritePin(EN_P_3V3_SW_GPIO_Port, EN_P_3V3_SW_Pin, GPIO_PIN_SET);
     HAL_Delay(1);
 
-    // Step 4: CTRL_SW safe-default is RX.
-    // FPGA-owned path: with TR_SOURCE=1 (set in initializeSingleDevice) the
-    // chip follows adar_tr_x, which is 0 in the FPGA FSM's IDLE state = RX.
-    // No SPI write needed here.
-    DIAG("BF", "Step 4: CTRL_SW -> RX (FPGA adar_tr_x idle-low == RX)");
+    // Step 4: CTRL_SW. With TR_SOURCE=1 the chip will follow FPGA adar_tr_x
+    // once initializeSingleDevice has run; nothing to write here.
+    DIAG("BF", "Step 4: CTRL_SW -> follows FPGA adar_tr_x post-init (no SPI write)");
     HAL_Delay(1);
 
-    // Step 5: Set VGG_LNA to 0
-    DIAG("BF", "Step 5: VGG_LNA bias -> OFF (0x%02X)", kLnaBiasOff);
-    uint8_t lna_bias_voltage = kLnaBiasOff;
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_LNA_BIAS_ON, lna_bias_voltage, BROADCAST_OFF);
-        adarWrite(dev, REG_LNA_BIAS_OFF, kLnaBiasOff, BROADCAST_OFF);
-    }
-
-    // Step 6: Set VDD_LNA to 0V for TX mode
+    // Step 6: VDD_LNA -> 0V (disable ADTR LNA supply for TX path).
     DIAG("BF", "Step 6: VDD_LNA -> 0V (disable ADTR LNA supply)");
     HAL_GPIO_WritePin(EN_P_3V3_ADTR_GPIO_Port, EN_P_3V3_ADTR_Pin, GPIO_PIN_RESET);
     HAL_Delay(2);
 
-    // Step 7: Set VGG_PA to safe negative voltage (PA off for TX mode)
-    /*A 0x00 value in the
-    on or off bias registers, correspond to a 0 V output. A 0xFF in the
-    on or off bias registers correspond to a −4.8 V output.*/
-    DIAG("BF", "Step 7: VGG_PA -> safe bias 0x%02X (~ -1.75V, PA off)", kPaBiasTxSafe);
-    uint8_t safe_pa_bias = kPaBiasTxSafe; // Safe negative voltage (-1.75V) to keep PA off
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_PA_CH1_BIAS_ON, safe_pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH2_BIAS_ON, safe_pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH3_BIAS_ON, safe_pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH4_BIAS_ON, safe_pa_bias, BROADCAST_OFF);
-    }
-    HAL_Delay(10);
-
-    // Step 8: Set VDD_PA to 0V (PA powered up for TX mode)
+    // Step 8: Enable PA supplies. Bias-register writes happen in
+    // applyADTRBiasDefaults() AFTER the soft-reset-driven init.
     DIAG("BF", "Step 8: Enable PA supplies (VDD_PA)");
     enablePASupplies();
     HAL_Delay(50);
 
-    // Step 9: Adjust VGG_PA voltage between −1.75 V and −0.25 V to achieve the desired IDQ_PA=220mA
-    //Set VGG_PA to safe negative voltage (PA off for TX mode)
-    /*A 0x00 value in the
-    on or off bias registers, correspond to a 0 V output. A 0xFF in the
-    on or off bias registers correspond to a −4.8 V output.*/
-    DIAG("BF", "Step 9: VGG_PA -> Idq cal bias 0x%02X (~ -0.24V, target 220mA)", kPaBiasIdqCalibration);
-    uint8_t Idq_pa_bias = kPaBiasIdqCalibration; // Safe negative voltage (-0.2447V) to keep PA off
+    DIAG_ELAPSED("BF", "ADTR1107 power sequence (rails)", t0);
+
+    const uint8_t success[] = "ADTR1107 power sequence (rails) completed.\r\n";
+    HAL_UART_Transmit(&huart3, success, sizeof(success) - 1, 1000);
+
+    return true;
+}
+
+bool ADAR1000Manager::applyADTRBiasDefaults() {
+    /* F-1.7: re-emit the LNA-off + PA-safe + PA-Idq-cal bias values that the
+     * original 9-step ADTR1107 sequence wrote in Steps 5/7/9. Must be called
+     * AFTER initializeAllDevices() because adarSoftReset() in
+     * initializeSingleDevice wipes every register to POR-default 0V. */
+    DIAG_SECTION("ADTR1107 BIAS DEFAULTS (post-init)");
+    uint32_t t0 = HAL_GetTick();
+
+    // Step 5: VGG_LNA -> OFF (both ON and OFF bias registers).
+    DIAG("BF", "Step 5: VGG_LNA bias -> OFF (0x%02X)", kLnaBiasOff);
     for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_PA_CH1_BIAS_ON, Idq_pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH2_BIAS_ON, Idq_pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH3_BIAS_ON, Idq_pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH4_BIAS_ON, Idq_pa_bias, BROADCAST_OFF);
+        adarWrite(dev, REG_LNA_BIAS_ON, kLnaBiasOff, BROADCAST_OFF);
+        adarWrite(dev, REG_LNA_BIAS_OFF, kLnaBiasOff, BROADCAST_OFF);
+    }
+
+    // Step 7: VGG_PA -> safe negative voltage. ADAR1000 datasheet:
+    // 0x00 -> 0 V, 0xFF -> -4.8 V on bias output; kPaBiasTxSafe (~ -1.75 V)
+    // keeps the ADTR1107 PA off while we settle.
+    DIAG("BF", "Step 7: VGG_PA -> safe bias 0x%02X (~ -1.75V, PA off)", kPaBiasTxSafe);
+    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
+        adarWrite(dev, REG_PA_CH1_BIAS_ON, kPaBiasTxSafe, BROADCAST_OFF);
+        adarWrite(dev, REG_PA_CH2_BIAS_ON, kPaBiasTxSafe, BROADCAST_OFF);
+        adarWrite(dev, REG_PA_CH3_BIAS_ON, kPaBiasTxSafe, BROADCAST_OFF);
+        adarWrite(dev, REG_PA_CH4_BIAS_ON, kPaBiasTxSafe, BROADCAST_OFF);
     }
     HAL_Delay(10);
 
-    DIAG_ELAPSED("BF", "ADTR1107 power sequence", t0);
+    // Step 9: VGG_PA -> Idq cal bias (~ -0.24 V, IDQ_PA = 220 mA target).
+    DIAG("BF", "Step 9: VGG_PA -> Idq cal bias 0x%02X (~ -0.24V, target 220mA)", kPaBiasIdqCalibration);
+    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
+        adarWrite(dev, REG_PA_CH1_BIAS_ON, kPaBiasIdqCalibration, BROADCAST_OFF);
+        adarWrite(dev, REG_PA_CH2_BIAS_ON, kPaBiasIdqCalibration, BROADCAST_OFF);
+        adarWrite(dev, REG_PA_CH3_BIAS_ON, kPaBiasIdqCalibration, BROADCAST_OFF);
+        adarWrite(dev, REG_PA_CH4_BIAS_ON, kPaBiasIdqCalibration, BROADCAST_OFF);
+    }
+    HAL_Delay(10);
 
-    const uint8_t success[] = "ADTR1107 power sequence completed.\r\n";
-    HAL_UART_Transmit(&huart3, success, sizeof(success) - 1, 1000);
-
+    DIAG_ELAPSED("BF", "ADTR1107 bias defaults", t0);
     return true;
 }
 
@@ -513,10 +417,8 @@ bool ADAR1000Manager::setAllDevicesTXMode() {
         adarWrite(dev, REG_TX_ENABLES, 0x0F, BROADCAST_OFF); // Enable all 4 channels
         adarSetTxBias(dev, BROADCAST_OFF);
 
-        devices_[dev]->current_mode = BeamDirection::TX;
         DIAG("BF", "  dev[%u] TX mode set (enables=0x0F, bias applied)", dev);
     }
-    current_mode_ = BeamDirection::TX;
     return true;
 }
 
@@ -533,17 +435,14 @@ bool ADAR1000Manager::setAllDevicesRXMode() {
         // Enable RX channels
         adarWrite(dev, REG_RX_ENABLES, 0x0F, BROADCAST_OFF); // Enable all 4 channels
 
-        devices_[dev]->current_mode = BeamDirection::RX;
         DIAG("BF", "  dev[%u] RX mode set (enables=0x0F)", dev);
     }
-    current_mode_ = BeamDirection::RX;
     return true;
 }
 
 void ADAR1000Manager::setADTR1107Mode(BeamDirection direction) {
     if (direction == BeamDirection::TX) {
         DIAG_SECTION("ADTR1107 -> TX MODE");
-        // setADTR1107Control(true) removed: TR pin is FPGA-driven.
 
         // Step 1: Disable LNA power first
         DIAG("BF", "  Disable LNA supplies");
@@ -585,7 +484,6 @@ void ADAR1000Manager::setADTR1107Mode(BeamDirection direction) {
     } else {
         // RECEIVE MODE: Enable LNA, Disable PA
         DIAG_SECTION("ADTR1107 -> RX MODE");
-        // setADTR1107Control(false) removed: TR pin is FPGA-driven.
 
         // Step 1: Disable PA power first
         DIAG("BF", "  Disable PA supplies");
@@ -626,13 +524,6 @@ void ADAR1000Manager::setADTR1107Mode(BeamDirection direction) {
     }
 }
 
-// setADTR1107Control, setTRSwitchPosition: REMOVED.
-// The per-device SPI RMW of REG_SW_CONTROL bit 2 (TR_SOURCE) was both wrong
-// (it toggled the *control source*, not the TX/RX state -- TR_SPI is bit 1)
-// and redundant with the FPGA's plfm_chirp_controller adar_tr_x output.
-// TR_SOURCE is now set to 1 exactly once in initializeSingleDevice.
-
-// Add the new public method
 bool ADAR1000Manager::setCustomBeamPattern16(const uint8_t phase_pattern[16], BeamDirection direction) {
     for (uint8_t dev = 0; dev < 4; ++dev) {
         for (uint8_t ch = 0; ch < 4; ++ch) {
@@ -708,23 +599,6 @@ void ADAR1000Manager::delayUs(uint32_t microseconds) {
     const uint32_t target        = microseconds * cycles_per_us;
     while ((DWT->CYCCNT - start) < target) {
         /* CYCCNT wraps cleanly modulo 2^32 — subtraction stays correct. */
-    }
-}
-
-void ADAR1000Manager::calculatePhaseSettings(float angle_degrees, uint8_t phase_settings[4]) {
-    const float freq = 10.5e9;
-    const float c = 3e8;
-    const float wavelength = c / freq;
-    const float element_spacing = wavelength / 2;
-
-    float angle_rad = angle_degrees * M_PI / 180.0;
-    float phase_shift = (2 * M_PI * element_spacing * sin(angle_rad)) / wavelength;
-
-    for (int i = 0; i < 4; ++i) {
-        float element_phase = i * phase_shift;
-        while (element_phase < 0) element_phase += 2 * M_PI;
-        while (element_phase >= 2 * M_PI) element_phase -= 2 * M_PI;
-        phase_settings[i] = static_cast<uint8_t>((element_phase / (2 * M_PI)) * 128);
     }
 }
 

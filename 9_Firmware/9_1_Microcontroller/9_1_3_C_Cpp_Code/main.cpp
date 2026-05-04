@@ -297,7 +297,11 @@ void systemPowerUpSequence();
 void systemPowerDownSequence();
 void initializeBeamMatrices();
 void runRadarPulseSequence();
-void executeChirpSequence(int num_chirps, uint32_t T1, uint32_t PRI1, uint32_t T2, uint32_t PRI2);
+/* F-2.1: executeChirpSequence() removed. The MCU is no longer in the chirp
+ * dispatch path -- production runs FPGA mode 2'b01 (auto-scan) where
+ * chirp_scheduler.v owns chirp timing and adar_tr_x. See runRadarPulseSequence
+ * header for the rationale and the chirp_scheduler.v RP_MODE_AUTO_3KM block
+ * (line ~317) for the FPGA-side behaviour. */
 void printSystemStatus();
 
 //////////////////////////////////////////////
@@ -376,17 +380,21 @@ void systemPowerUpSequence() {
     uint8_t msg[] = "Starting Power Up Sequence...\r\n";
     HAL_UART_Transmit(&huart3, msg, sizeof(msg)-1, 1000);
 
-    // Step 1: Initialize ADTR1107 power sequence
-    DIAG("PWR", "Step 1: initializeADTR1107Sequence()");
+    // Step 1: ADTR1107 GPIO + power-rail bring-up. Bias-register writes are
+    // deferred to applyADTRBiasDefaults() because the next step's soft reset
+    // would wipe them.
+    DIAG("PWR", "Step 1: initializeADTR1107Sequence()  (rails only)");
     if (!adarManager.initializeADTR1107Sequence()) {
         DIAG_ERR("PWR", "ADTR1107 power sequence FAILED -- calling Error_Handler()");
         uint8_t err[] = "ERROR: ADTR1107 power sequence failed!\r\n";
         HAL_UART_Transmit(&huart3, err, sizeof(err)-1, 1000);
         Error_Handler();
     }
-    DIAG("PWR", "Step 1 OK: ADTR1107 sequence complete");
+    DIAG("PWR", "Step 1 OK: ADTR1107 rails up");
 
-    // Step 2: Initialize all ADAR1000 devices
+    // Step 2: Soft-reset + per-device init (sets TR_SOURCE=1, ADC, VGA gains).
+    // Ends with setAllDevicesTXMode() inside initializeAllDevices, which sets
+    // PA bias to operational; the next step trims to the Idq-cal target.
     DIAG("PWR", "Step 2: initializeAllDevices()");
     if (!adarManager.initializeAllDevices()) {
         DIAG_ERR("PWR", "ADAR1000 initialization FAILED -- calling Error_Handler()");
@@ -396,24 +404,32 @@ void systemPowerUpSequence() {
     }
     DIAG("PWR", "Step 2 OK: All ADAR1000 devices initialized");
 
-    // Step 3: Perform system calibration
-    DIAG("PWR", "Step 3: performSystemCalibration()");
+    // Step 3: Re-emit ADTR1107 LNA-off + PA-Idq-cal bias values (the Step 5/7/9
+    // writes that the original 9-step sequence put before init, where they
+    // were getting wiped by the soft reset). F-1.7 in startup audit.
+    DIAG("PWR", "Step 3: applyADTRBiasDefaults()  (F-1.7: post-soft-reset bias trim)");
+    if (!adarManager.applyADTRBiasDefaults()) {
+        DIAG_WARN("PWR", "ADTR bias defaults returned issues (non-fatal)");
+    }
+
+    // Step 4: Verify ADAR1000 SPI scratchpad on every device.
+    DIAG("PWR", "Step 4: performSystemCalibration()");
     if (!adarManager.performSystemCalibration()) {
         DIAG_WARN("PWR", "System calibration returned issues (non-fatal)");
         uint8_t warn[] = "WARNING: System calibration issues\r\n";
         HAL_UART_Transmit(&huart3, warn, sizeof(warn)-1, 1000);
     } else {
-        DIAG("PWR", "Step 3 OK: System calibration passed");
+        DIAG("PWR", "Step 4 OK: System calibration passed");
     }
 
-    // Step 4: Set to safe TX mode
-    DIAG("PWR", "Step 4: setAllDevicesTXMode()");
-    adarManager.setAllDevicesTXMode();
-    DIAG("PWR", "Step 4 OK: All devices set to TX mode");
+    // (Former Step 4 setAllDevicesTXMode removed — F-1.8: it is already
+    // called at the end of initializeAllDevices(). The chip's TX/RX state is
+    // overridden per-chirp by the FPGA TR pin (TR_SOURCE=1), so the static
+    // mode chosen here is mostly cosmetic.)
 
     uint8_t success[] = "Power Up Sequence Completed Successfully\r\n";
     HAL_UART_Transmit(&huart3, success, sizeof(success)-1, 1000);
-    DIAG("PWR", "systemPowerUpSequence COMPLETE");
+    DIAG("PWR", "systemPowerUpSequence COMPLETE -- ready for radar loop");
 }
 
 void systemPowerDownSequence() {
@@ -468,7 +484,9 @@ void initializeBeamMatrices() {
     uint8_t msg[] = "Initializing Beam Matrices...\r\n";
     HAL_UART_Transmit(&huart3, msg, sizeof(msg)-1, 1000);
 
-    // Matrix1: Positions 1-15 (positive phase differences)
+    // Matrix1: phase_differences[0..14] (+160°..+0°). Array math gives beam
+    // peak at NEGATIVE θ (matrix1[0] → −62°, matrix1[14] → broadside).
+    // Physical sky/ground sign vs antenna mount is unverified (audit D2).
     for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
         float phase_diff_degrees = phase_differences[beam_pos];
 
@@ -478,7 +496,9 @@ void initializeBeamMatrices() {
         }
     }
 
-    // Matrix2: Positions 17-31 (negative phase differences)
+    // Matrix2: phase_differences[16..30] (−10.67°..−160°). Array math gives
+    // beam peak at POSITIVE θ (matrix2[0] → +4°, matrix2[14] → +62°).
+    // Same orientation caveat as Matrix1.
     for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
         float phase_diff_degrees = phase_differences[beam_pos + 16];
 
@@ -497,52 +517,36 @@ void initializeBeamMatrices() {
     HAL_UART_Transmit(&huart3, done, sizeof(done)-1, 1000);
 }
 
-void executeChirpSequence(int num_chirps, float T1, float PRI1, float T2, float PRI2) {
-    // NOTE: No per-chirp DIAG — this is a us/ns timing-critical path.
-    // Only log entry params for post-mortem analysis.
-    DIAG("SYS", "executeChirpSequence: num_chirps=%d T1=%.2f PRI1=%.2f T2=%.2f PRI2=%.2f",
-         num_chirps, T1, PRI1, T2, PRI2);
-    // First chirp sequence (microsecond timing)
-    // T/R switching is owned by the FPGA plfm_chirp_controller: its chirp
-    // FSM drives adar_tr_x high during LONG_CHIRP/SHORT_CHIRP and low during
-    // listen/guard. new_chirp (GPIOD_8) triggers the FSM out of IDLE.
-    // The MCU's old pulseTXMode/pulseRXMode SPI path was redundant and raced
-    // the FPGA -- removed.
-    for(int i = 0; i < num_chirps; i++) {
-        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_8); // New chirp signal to FPGA
-        delay_us((uint32_t)T1);
-        delay_us((uint32_t)(PRI1 - T1));
-    }
-
-    delay_us((uint32_t)Guard);
-
-    // Second chirp sequence (nanosecond timing)
-    for(int i = 0; i < num_chirps; i++) {
-    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_8); // New chirp signal to FPGA
-        delay_ns((uint32_t)(T2 * 1000));
-        delay_ns((uint32_t)((PRI2 - T2) * 1000));
-    }
-}
-
-/* runRadarPulseSequence — beam-steering loop + STM32 pass-through GPIO toggles.
+/* F-2.1 (delete branch): runRadarPulseSequence — per-frame beam-steering
+ * loop + stepper rotation.
  *
- * IMPORTANT (P-5 / PR-Q.1 follow-up): in production the FPGA cold-resets to
- * host_radar_mode = 2'b01 (auto-scan) — see radar_system_top.v:1045. In that
- * mode the FPGA's chirp_scheduler owns chirp timing and IGNORES the GPIOD_8
- * (new_chirp), GPIOD_9 (new_elevation), GPIOD_10 (new_azimuth) toggles this
- * function emits via executeChirpSequence. The MCU's only live job per frame
- * is therefore beam steering (ADAR1000 pattern updates) + stepper rotation.
+ * The MCU does NOT drive chirp timing. Production runs FPGA mode 2'b01
+ * (`RP_MODE_AUTO_3KM`, the cold-reset default at radar_system_top.v:1058).
+ * In that mode chirp_scheduler.v owns the SHORT/MEDIUM/LONG sub-frame walk
+ * and plfm_chirp_controller.v drives `adar_tr_x` per chirp. The MCU's only
+ * live per-frame work is:
+ *   1. Updating ADAR1000 beam patterns (matrix1 / vector_0 / matrix2)
+ *      via setCustomBeamPattern16 — once per pattern, three patterns per
+ *      beam position, 15 beam positions per frame = 90 ADAR SPI writes.
+ *   2. Rotating the stepper to the next azimuth slot at end-of-frame.
  *
- * MODE 2'b00 (STM32 pass-through) requires the MCU to drive the 3-PRI ladder
- *   SHORT  175 us  (T2=1 us chirp)
- *   MEDIUM 161 us  (T_MEDIUM=5 us chirp)  -- PR-Q.1 stagger
- *   LONG   167 us  (T1=30 us chirp)
- * for the host-side CRT Doppler unfolder (processing.py extract_targets_from_
- * frame_crt) to deliver unambiguous velocities. The current GPIO loop only
- * emits two PRIs (PRI1=167 LONG, PRI2=175 SHORT) and is structured around
- * the pre-PR-F m_max=32 frame, so pass-through mode is OPERATIONALLY
- * UNSUPPORTED until this loop is rebuilt to dispatch 3 sub-frames in
- * SHORT/MEDIUM/LONG order. Do not switch the FPGA into mode 00 until then.
+ * History: this function previously called executeChirpSequence() to emit
+ * GPIO toggles on PD8/PD9/PD10 intended for FPGA mode 2'b00 (STM32
+ * pass-through). Mode 2'b00 was never end-to-end validated — the GPIO loop
+ * emitted only 2 PRIs (LONG, SHORT) and was structured for the pre-PR-F
+ * m_max=32 frame, while the production receiver chain (PR-F doppler/mti/
+ * cfar) expects 3 sub-frames (SHORT/MEDIUM/LONG) for the CRT Doppler
+ * unfolder. Building out a real 3-PRI pass-through would require a hardware
+ * timer driving PD8 (software delay_us is 3% jittery, unacceptable for
+ * Doppler) and full agreement between MCU and FPGA on chirps_per_subframe.
+ * That work was decided not worth doing — see audit memory
+ * project_aeris10_startup_audit_2026-05-04.md F-2.1 rationale.
+ *
+ * The m / n / y globals are kept and incremented (they feed
+ * getSystemStatusForGUI as ChirpCount / BeamPos / Azimuth). m advances by
+ * the same per-frame amount (3 × m_max/2) it did before so the GUI counter
+ * stays continuous; the actual count of chirps fired is owned by the FPGA
+ * and surfaces via the bulk-frame status word, not via this counter.
  */
 void runRadarPulseSequence() {
     static int sequence_count = 0;
@@ -553,8 +557,6 @@ void runRadarPulseSequence() {
     DIAG("SYS", "runRadarPulseSequence #%d: m_max=%d n_max=%d y_max=%d",
          sequence_count, m_max, n_max, y_max);
 
-    // Fast per-chirp switching is now FPGA-owned (plfm_chirp_controller
-    // adar_tr_x), not MCU-driven. setFastSwitchMode(true) call removed.
     DIAG("BF", "Beam sweep start (FPGA owns per-chirp T/R switching)");
 
     // MCU-N5/C4: do NOT redeclare m/n/y here — they are file-scope globals
@@ -562,29 +564,43 @@ void runRadarPulseSequence() {
     // BeamPos/Azimuth/ChirpCount. Local declarations would shadow them and
     // freeze the telemetry at 1.
 
-    // Main beam steering sequence
+    /* Main beam steering sequence. Per beam position we push three ADAR1000
+     * pattern updates: matrix1, vector_0 (broadside), matrix2 (see
+     * initializeBeamMatrices for the actual sim-peak directions and the
+     * sign-convention caveat). The FPGA's chirp_scheduler is firing the
+     * 3-PRI ladder against whichever pattern is currently loaded; we hold
+     * each pattern for one full SHORT/MEDIUM/LONG ladder before advancing.
+     *
+     * Per-pattern dwell:
+     *   16 × PRI_SHORT  (175 us) +
+     *   16 × PRI_MEDIUM (161 us) +
+     *   16 × PRI_LONG   (167 us) = 8048 us per ladder, rounded to 8 ms.
+     * HAL_Delay yields to SysTick / IRQs, so unlike the removed
+     * executeChirpSequence busy-loop the MCU stays responsive to USB CDC,
+     * UART, and I2C peripherals during the dwell. For drift-immune sync
+     * we'd wait on an FPGA `subframe_pulse` GPIO instead, but the bitstream
+     * does not currently bring that signal out to a pin. */
+    static const uint32_t BEAM_PATTERN_DWELL_MS = 8u;
+
     for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
-    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_9);// Notify FPGA of elevation change
-    	DIAG("SYS", "Beam pos %d/15: elevation GPIO toggle, patterns matrix1/vector_0/matrix2", beam_pos);
-        // Pattern 1: matrix1 (positive steering angles)
+    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_9);// new_elevation -- mode 2'b00 input only; no-op in production mode 2'b01 but harmless to keep
+    	DIAG("SYS", "Beam pos %d/15: patterns matrix1/vector_0/matrix2", beam_pos);
+        // Pattern 1: matrix1
         adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::TX);
         adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::RX);
-
-        executeChirpSequence(m_max/2, T1, PRI1, T2, PRI2);
+        HAL_Delay(BEAM_PATTERN_DWELL_MS);
         m += m_max/2;
 
         // Pattern 2: vector_0 (broadside)
         adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::TX);
         adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::RX);
-
-        executeChirpSequence(m_max/2, T1, PRI1, T2, PRI2);
+        HAL_Delay(BEAM_PATTERN_DWELL_MS);
         m += m_max/2;
 
-        // Pattern 3: matrix2 (negative steering angles)
+        // Pattern 3: matrix2
         adarManager.setCustomBeamPattern16(matrix2[beam_pos], ADAR1000Manager::BeamDirection::TX);
         adarManager.setCustomBeamPattern16(matrix2[beam_pos], ADAR1000Manager::BeamDirection::RX);
-
-        executeChirpSequence(m_max/2, T1, PRI1, T2, PRI2);
+        HAL_Delay(BEAM_PATTERN_DWELL_MS);
         m += m_max/2;
 
         // Reset chirp counter if needed
@@ -1253,9 +1269,40 @@ bool checkSystemHealthStatus(void) {
                 system_emergency_state = true;
                 DIAG_ERR("SYS", "Latching system_emergency_state due to error_count > 10");
             }
+            /* F-2.5 FIX: persist emergency state to BKPSRAM so the IWDG reset
+             * that follows the SAFE-MODE blink loop in main() boots straight
+             * back into safe-hold (Emergency_Stop on the persist-check at
+             * ~line 1630) instead of re-running init and re-energising the
+             * PA rails. The critical-error path through Emergency_Stop()
+             * already persists; the non-critical-escalation path (this one)
+             * was the missing leg, leaving the system in a reset cycle with
+             * intermittent PA-on time while the underlying fault is unfixed.
+             * Idempotent (just writes a magic word). */
+            emergency_persist_set();
             DIAG_ERR("SYS", "checkSystemHealthStatus returning FALSE (emergency=true error_count=%lu)",
                      error_count);
             return false;
+        }
+    } else {
+        /* F-2.7a FIX: telemetry hygiene — clear last_error / error_count
+         * after recovery is confirmed stable (5 consecutive clean health
+         * checks, ~1.3 s at 258 ms frame cadence). Without this,
+         * getSystemStatusForGUI keeps reporting the stale last_error
+         * indefinitely after a transient fault auto-recovers (e.g. an
+         * ADAR1000 SPI glitch resolved by attemptErrorRecovery). The 5-iter
+         * confirmation prevents an intermittently-failing peripheral from
+         * looking healed between flaps. error_count is also reset so the
+         * `error_count > 10` escalation gate measures *current* run-rate,
+         * not lifetime cumulative since boot. */
+        static uint32_t clean_streak = 0;
+        if (last_error != ERROR_NONE) {
+            if (++clean_streak >= 5) {
+                DIAG("SYS", "Recovery confirmed stable -- clearing last_error=%d error_count=%lu",
+                     (int)last_error, (unsigned long)error_count);
+                last_error = ERROR_NONE;
+                error_count = 0;
+                clean_streak = 0;
+            }
         }
     }
 
@@ -1554,106 +1601,6 @@ static int configure_ad9523(void)
     return 0;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////ADAR1000//////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-// Alternative approach using the beam sequence feature
-void setupBeamSequences(ADAR1000Manager& manager) {
-    std::vector<ADAR1000Manager::BeamConfig> tx_sequence;
-    std::vector<ADAR1000Manager::BeamConfig> rx_sequence;
-
-    // Create beam configurations for each pattern
-    // Matrix1 sequences (14 steps)
-    for(int i = 0; i < 14; i++) {
-        ADAR1000Manager::BeamConfig tx_config;
-        ADAR1000Manager::BeamConfig rx_config;
-
-        // Calculate angles or use your matrix directly
-        // For now, we'll use a placeholder angle and set phases manually later
-        tx_config.angle_degrees = 0; // This would be calculated from your matrix
-        rx_config.angle_degrees = 0;
-
-        // Copy phase settings from matrix1
-        for(int ch = 0; ch < 16; ch++) {
-            if(ch < 4) {
-                tx_config.phase_settings[ch] = matrix1[i][ch];
-                rx_config.phase_settings[ch] = matrix1[i][ch];
-            }
-        }
-
-        tx_sequence.push_back(tx_config);
-        rx_sequence.push_back(rx_config);
-    }
-
-    // You would similarly add the zero phase and matrix2 sequences
-
-    // Note: The beam sequence feature in the manager currently uses calculated phases
-    // You might need to modify the manager to support pre-calculated phase arrays
-}
-void setCustomBeamPattern(ADAR1000Manager& manager, uint8_t phase_pattern[16]) {
-    // Set TX phases for all 4 ADAR1000 devices
-    for(int dev = 0; dev < 4; dev++) {
-        for(int ch = 0; ch < 4; ch++) {
-            uint8_t phase = phase_pattern[dev * 4 + ch];
-            manager.adarSetTxPhase(dev, ch + 1, phase, BROADCAST_OFF);
-        }
-    }
-
-    // Set RX phases for all 4 ADAR1000 devices
-    for(int dev = 0; dev < 4; dev++) {
-        for(int ch = 0; ch < 4; ch++) {
-            uint8_t phase = phase_pattern[dev * 4 + ch];
-            manager.adarSetRxPhase(dev, ch + 1, phase, BROADCAST_OFF);
-        }
-    }
-}
-
-void initializeBeamMatricesWithSteeringAngles() {
-    const float wavelength = 0.02857f; // 10.5 GHz wavelength in meters
-    const float element_spacing = wavelength / 2.0f;
-
-    // Calculate steering angles from phase differences
-    float steering_angles[31];
-    for(int i = 0; i < 31; i++) {
-        float phase_diff_rad = phase_differences[i] * M_PI / 180.0f;
-        steering_angles[i] = asin((phase_diff_rad * wavelength) / (2 * M_PI * element_spacing)) * 180.0f / M_PI;
-    }
-
-    // Matrix1: Positive angles (positions 1-15)
-    for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
-        float angle = steering_angles[beam_pos];
-
-        for(int element = 0; element < 16; element++) {
-            // Calculate phase shift for linear array
-            float phase_shift_rad = (2 * M_PI * element_spacing * element * sin(angle * M_PI / 180.0f)) / wavelength;
-            float phase_degrees = phase_shift_rad * 180.0f / M_PI;
-
-            // Wrap to 0-360 degrees
-            while(phase_degrees < 0) phase_degrees += 360;
-            while(phase_degrees >= 360) phase_degrees -= 360;
-
-            matrix1[beam_pos][element] = (uint8_t)((phase_degrees / 360.0f) * 128);
-        }
-    }
-
-    // Matrix2: Negative angles (positions 17-31)
-    for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
-        float angle = steering_angles[beam_pos + 16];
-
-        for(int element = 0; element < 16; element++) {
-            float phase_shift_rad = (2 * M_PI * element_spacing * element * sin(angle * M_PI / 180.0f)) / wavelength;
-            float phase_degrees = phase_shift_rad * 180.0f / M_PI;
-
-            while(phase_degrees < 0) phase_degrees += 360;
-            while(phase_degrees >= 360) phase_degrees -= 360;
-
-            matrix2[beam_pos][element] = (uint8_t)((phase_degrees / 360.0f) * 128);
-        }
-    }
-}
-
-
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -1768,10 +1715,7 @@ int main(void)
   DIAG("PWR", "Enabling 3.3V clock rail");
   HAL_GPIO_WritePin(EN_P_3V3_CLOCK_GPIO_Port,EN_P_3V3_CLOCK_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
-  DIAG("PWR", "Releasing AD9523 reset (pin HIGH)");
-  HAL_GPIO_WritePin(AD9523_RESET_GPIO_Port,AD9523_RESET_Pin,GPIO_PIN_SET);
-  HAL_Delay(100);
-  DIAG("PWR", "AD9523 power sequencing complete -- all rails up, reset released");
+  DIAG("PWR", "AD9523 rails up; reset will be released inside configure_ad9523()");
 
   //Set planned Clocks on AD9523
   /*
@@ -1813,6 +1757,26 @@ int main(void)
   HAL_Delay(100);
   DIAG("PWR", "FPGA power sequencing complete -- 1.0V -> 1.8V -> 3.3V");
 
+  /* Pulse FPGA reset (PD12) immediately after rails are stable so the FPGA
+   * outputs (`adar_tr_x`, `mixers_enable`, `new_chirp/elevation/azimuth`)
+   * are driven to known defaults BEFORE any ADAR1000 SPI traffic looks at
+   * the TR pin. PA Vdd remains gated by `EN_DIS_RFPA_VDD` later, so PA
+   * protection is unchanged. */
+  DIAG("FPGA", "Resetting FPGA (GPIOD pin 12: LOW -> 10ms -> HIGH)");
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+  DIAG("FPGA", "FPGA reset complete -- adar_tr_x driven LOW (RX commanded)");
+
+  /* F-2.1: this firmware build supports only FPGA mode 2'b01 (RP_MODE_AUTO_3KM,
+   * the cold-reset default at radar_system_top.v:1058). The MCU does not
+   * dispatch chirps -- chirp_scheduler.v owns the SHORT/MEDIUM/LONG ladder.
+   * Mode 2'b00 (STM32 pass-through) is supported on the FPGA side but is
+   * NOT implemented in this firmware: a real pass-through would need a
+   * hardware-timer-driven PD8 emitter (software delay_us is too jittery
+   * for Doppler) plus MCU<->FPGA agreement on host_chirps_per_subframe.
+   * Operators must not change host_radar_mode away from 2'b01. */
+  DIAG("FPGA", "Production mode: host_radar_mode = 2'b01 (auto-scan, FPGA-owned chirp dispatch)");
 
 // Initialize module IMU
   DIAG_SECTION("IMU INIT (GY-85)");
@@ -2061,6 +2025,12 @@ int main(void)
                      (unsigned long)lock_timeout,
                      tx_locked ? "LOCKED" : "UNLOCKED",
                      rx_locked ? "LOCKED" : "UNLOCKED");
+            /* F-1.6: latch emergency state. PA Vdd enable + TX mixer enable
+             * later in this function, and the radar loop in main(), all gate
+             * on system_emergency_state — keying the PA into an unlocked
+             * synth would radiate spurious/free-running RF at full power. */
+            last_error = (!tx_locked) ? ERROR_ADF4382_TX_UNLOCK : ERROR_ADF4382_RX_UNLOCK;
+            system_emergency_state = true;
         }
 
   // check if there is a lock via direct GPIO (independent of register read above)
@@ -2193,27 +2163,13 @@ int main(void)
    * re-enabled) should be handled non-blocking in the main loop. */
 
   /***************************************************************/
-  /************ FPGA reset (BEFORE PA Vdd enable) ****************/
-  /***************************************************************/
-  /* [MCU-N2/N11 FIX] Reset FPGA early — before any PA-rail enables —
-   * so `adar_tr_x` is driven LOW (RX commanded externally) when the PA Vdd
-   * rail later comes up to 22 V. Without this, PA could be energised while
-   * the FPGA is still in its implicit reset and `adar_tr_x` is undefined,
-   * with the ADAR1000 already commanded to TX (TR_SOURCE=1) — a glitch
-   * could key the PA into an undefined antenna load. Kept outside the
-   * `if (PowerAmplifier)` block so the FPGA always boots cleanly even when
-   * the PA path is disabled for bench testing. TX mixer enable (PD11) is
-   * still LOW (set by MX_GPIO_Init), so no chirps fire. */
-  DIAG("FPGA", "Resetting FPGA (GPIOD pin 12: LOW -> 10ms -> HIGH)");
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
-  HAL_Delay(10);
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
-  DIAG("FPGA", "FPGA reset complete -- adar_tr_x driven LOW (RX commanded)");
-
-  /***************************************************************/
   /************RF Power Amplifier Powering up sequence************/
   /***************************************************************/
-  if(PowerAmplifier){
+  /* FPGA was reset right after its 3V3 rail came up — adar_tr_x has been
+   * driven LOW (RX) for the entire interval since then. PA Vdd is still
+   * gated by EN_DIS_RFPA_VDD below. F-1.6: PA enable also gates on
+   * !system_emergency_state — set true earlier on LO lock failure. */
+  if(PowerAmplifier && !system_emergency_state){
 	  DIAG_SECTION("PA: RF Power Amplifier power-up sequence");
 	  /* Initialize DACs */
 	  /* DAC1: Address 0b1001000 = 0x48 */
@@ -2267,10 +2223,9 @@ int main(void)
 	  HAL_GPIO_WritePin(DAC_2_VG_LDAC_GPIO_Port, DAC_2_VG_LDAC_Pin, GPIO_PIN_SET);
 
 	  //Enable RF Power Amplifier VDD = 22V
-	  /* [MCU-N2/N11] FPGA has already been reset earlier (before this PA block)
-	   * so `adar_tr_x` is now driven LOW (RX commanded). Safe to bring PA Vdd
-	   * up to 22 V here. TX mixer enable (PD11) is still LOW until later,
-	   * gating any FPGA-driven chirps. */
+	  /* FPGA reset was issued right after its 3V3 rail came up; adar_tr_x has
+	   * been LOW (RX) ever since. TX mixer enable (PD11) is still LOW until
+	   * later, gating any FPGA-driven chirps. Safe to bring PA Vdd to 22 V. */
 	  DIAG("PA", "Enabling RFPA VDD=22V (EN_DIS_RFPA_VDD HIGH)");
 	  HAL_GPIO_WritePin(EN_DIS_RFPA_VDD_GPIO_Port, EN_DIS_RFPA_VDD_Pin, GPIO_PIN_SET);
 
@@ -2357,16 +2312,13 @@ int main(void)
 	  DIAG("PA", "PA IDQ calibration sequence COMPLETE");
   }
 
-  /* [MCU-N2/N11] FPGA was already reset earlier in the boot sequence,
-   * before PA Vdd was energised, to avoid an undefined `adar_tr_x` window.
-   * No further reset needed here. Leaving the comment so future readers
-   * understand why this block looks like it should be present. */
-
-
-
-  //Tell FPGA to apply TX RF by enabling Mixers
-  DIAG("FPGA", "Enabling TX mixers (GPIOD pin 11 HIGH)");
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, GPIO_PIN_SET);
+  //Tell FPGA to apply TX RF by enabling Mixers (F-1.6: skip if emergency)
+  if (!system_emergency_state) {
+    DIAG("FPGA", "Enabling TX mixers (GPIOD pin 11 HIGH)");
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, GPIO_PIN_SET);
+  } else {
+    DIAG_ERR("FPGA", "TX mixer enable SKIPPED -- system_emergency_state=true (LO lock failed?)");
+  }
 
   /* T°C sensor TMP37 ADC3: Address 0x49, Single-Ended mode, Internal Ref ON + ADC ON */
   DIAG("SYS", "Initializing temperature sensor ADC3 (I2C2, addr=0x49, TMP37)");
@@ -2381,11 +2333,19 @@ int main(void)
   /************************ERRORS HANDLERS************************/
   /***************************************************************/
 
-  // Initialize error handler system
-  DIAG("SYS", "Initializing error handler: clearing error_count, last_error, emergency_state");
+  // Initialize error handler system. Only clear emergency_state / last_error
+  // when no fatal init error was latched — F-1.6 sets system_emergency_state
+  // on LO lock failure earlier in main(), and we must not clear that here or
+  // the PA / TX-mixer guards become a one-shot that's already been cleared
+  // by the time the main-loop health check runs.
+  DIAG("SYS", "Initializing error handler: clearing error_count; preserving any latched emergency state");
   error_count = 0;
-  last_error = ERROR_NONE;
-  system_emergency_state = false;
+  if (last_error == ERROR_NONE) {
+      system_emergency_state = false;
+  } else {
+      DIAG_ERR("SYS", "Init left last_error=%d, system_emergency_state=%d -- preserving for main-loop SAFE handling",
+               (int)last_error, (int)system_emergency_state);
+  }
 
   /***************************************************************/
   /*********************SEND TO GUI STATUS************************/
@@ -2429,9 +2389,18 @@ int main(void)
 
 	        char emergency_msg[] = "SYSTEM IN SAFE MODE - Manual intervention required\r\n";
 	        HAL_UART_Transmit(&huart3, (uint8_t*)emergency_msg, strlen(emergency_msg), 1000);
-	        DIAG_ERR("SYS", "SAFE MODE ACTIVE -- blinking all LEDs, waiting for system_emergency_state clear");
+	        DIAG_ERR("SYS", "SAFE MODE ACTIVE -- blinking all LEDs until IWDG resets the MCU");
 
-	        // Blink all LEDs to indicate safe mode (500ms period, visible to operator)
+	        /* F-2.4 FIX: blink-then-reset semantics. No main-loop path clears
+	         * system_emergency_state — the loop body deliberately omits
+	         * HAL_IWDG_Refresh() so the watchdog fires (~4 s) and resets the
+	         * MCU. checkSystemHealthStatus() has already called
+	         * emergency_persist_set() (F-2.5), so the next boot sees the
+	         * BKPSRAM flag at line ~1630 and routes straight into
+	         * Emergency_Stop's safe-hold (PA rails cut, infinite IWDG-
+	         * refreshed loop, power-cycle to clear). The previous comment
+	         * "waiting for system_emergency_state clear" implied a runtime
+	         * exit that never existed. */
 	        while (system_emergency_state) {
 	            HAL_GPIO_TogglePin(LED_1_GPIO_Port, LED_1_Pin);
 	            HAL_GPIO_TogglePin(LED_2_GPIO_Port, LED_2_Pin);
@@ -2439,7 +2408,9 @@ int main(void)
 	            HAL_GPIO_TogglePin(LED_4_GPIO_Port, LED_4_Pin);
 	            HAL_Delay(250);
 	        }
-	        DIAG("SYS", "Exited safe mode blink loop -- system_emergency_state cleared");
+	        /* NOTREACHED — IWDG resets before this line. Kept as defensive
+	         * marker for future refactors that might add a runtime clear. */
+	        DIAG("SYS", "Exited safe mode blink loop -- unexpected, system_emergency_state cleared");
 	    }
 
 	  //////////////////////////////////////////////////////////////////////////////////////
@@ -2451,32 +2422,26 @@ int main(void)
 	  if (um982_is_position_valid(&um982)) {
 	      RADAR_Latitude = um982_get_latitude(&um982);
 	      RADAR_Longitude = um982_get_longitude(&um982);
+	  } else if (um982_position_age(&um982) > 30000) {
+	      /* F-2.7b FIX: GPS fix has aged past the 30 s health-check threshold.
+	       * Invalidate the cached lat/lon globals so getSystemStatusForGUI()
+	       * does not keep emitting the last-known fix as if it were current.
+	       * NaN propagates through %.6f as "nan" which the GUI parser treats
+	       * as missing. The 30 s window matches the ERROR_GPS_COMM gate in
+	       * checkSystemHealth() at line 842. */
+	      RADAR_Latitude = NAN;
+	      RADAR_Longitude = NAN;
 	  }
 
-	  //////////////////////////////////////////////////////////////////////////////////////
-	  ////////////////////////// Monitor ADF4382A lock status periodically//////////////////
-	  //////////////////////////////////////////////////////////////////////////////////////
-
-      // Monitor lock status periodically
-      static uint32_t last_check = 0;
-      if (HAL_GetTick() - last_check > 5000) {
-          ADF4382A_CheckLockStatus(&lo_manager, &tx_locked, &rx_locked);
-
-          if (!tx_locked || !rx_locked) {
-              printf("LO Lock Lost! TX: %s, RX: %s\n",
-                     tx_locked ? "LOCKED" : "UNLOCKED",
-                     rx_locked ? "LOCKED" : "UNLOCKED");
-              DIAG_ERR("LO", "Lock LOST in main loop! TX=%s RX=%s",
-                       tx_locked ? "LOCKED" : "UNLOCKED",
-                       rx_locked ? "LOCKED" : "UNLOCKED");
-              DIAG_GPIO("LO", "TX_LKDET (direct)", ADF4382_TX_LKDET_GPIO_Port, ADF4382_TX_LKDET_Pin);
-              DIAG_GPIO("LO", "RX_LKDET (direct)", ADF4382_RX_LKDET_GPIO_Port, ADF4382_RX_LKDET_Pin);
-          } else {
-              DIAG("LO", "Lock poll OK: TX=LOCKED RX=LOCKED");
-          }
-
-          last_check = HAL_GetTick();
-      }
+	  /* F-2.1b: 5 s LO lock poll deleted. checkSystemHealth() at line ~749
+	   * already calls ADF4382A_CheckLockStatus(&lo_manager, ...) every
+	   * main-loop iteration (no rate-limit) and routes any unlock through
+	   * handleSystemError -> attemptErrorRecovery. The 5 s poll only added
+	   * DIAG noise -- it didn't feed the recovery path. (void)tx_locked /
+	   * (void)rx_locked silences the unused-but-set warning on the init
+	   * declaration at line ~1974, which only appears here in non-test builds. */
+	  (void)tx_locked;
+	  (void)rx_locked;
 	  //////////////////////////////////////////////////////////////////////////////////////
 	  ////////////////////////// Monitor Temperature Sensors periodically//////////////////
 	  //////////////////////////////////////////////////////////////////////////////////////
@@ -2535,8 +2500,13 @@ int main(void)
 		  /* [GAP-3 FIX 4] Periodic IDQ re-read — the Idq_reading[] array was only
 		   * populated during startup/calibration.  checkSystemHealth() compares
 		   * stale values for overcurrent (>2.5 A) and bias fault (<0.1 A) checks.
-		   * Re-read all 16 channels every 5 s alongside temperature. */
-		  if (PowerAmplifier) {
+		   * Re-read all 16 channels every 5 s alongside temperature.
+		   * F-2.8: extend the gate with !system_emergency_state to mirror the
+		   * F-1.6 pattern. If we entered safe mode mid-loop, systemPowerDown-
+		   * Sequence has cut the PA rails but the PowerAmplifier flag may
+		   * still be true — reading near-zero Idq values then would trip a
+		   * spurious ERROR_RF_PA_BIAS on the next checkSystemHealth pass. */
+		  if (PowerAmplifier && !system_emergency_state) {
 		      DIAG("PA", "Periodic IDQ re-read (ADC1 + ADC2, 16 channels)");
 		      for (uint8_t ch = 0; ch < 8; ch++) {
 		          adc1_readings[ch] = ADS7830_Measure_SingleEnded(&hadc1, ch);
@@ -2601,8 +2571,10 @@ int main(void)
        * ~4 s, the IWDG resets the MCU automatically. */
       HAL_IWDG_Refresh(&hiwdg);
 
-      // Optional: Add system monitoring here
-      // Check temperatures, power levels, etc.
+      /* F-2.3: removed stale "Optional: Add system monitoring here / Check
+       * temperatures, power levels, etc." TODO -- those checks are already
+       * performed above (temperature + IDQ at the 5 s tick, LO lock at the
+       * 5 s tick, ADF4382/ADAR/IMU/BMP/GPS/FPGA-DSP via checkSystemHealth). */
 
 
     /* USER CODE END WHILE */
@@ -2631,6 +2603,8 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
+  /* F-3.7: VOS3 + 72 MHz SYSCLK is intentional -- MCU is control-plane only,
+   * heavy DSP runs FPGA-side. F7 can hit 216 MHz @ VOS1 if MCU work demands. */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
   /** Initializes the RCC Oscillators according to the specified parameters
@@ -2958,7 +2932,8 @@ static void MX_TIM1_Init(void)
   * @brief TIM3 Initialization Function — DELADJ PWM for ADF4382A phase shift
   *        CH2 = TX DELADJ, CH3 = RX DELADJ
   *        Period (ARR) = 999 → 1000 counts matching DELADJ_MAX_DUTY_CYCLE
-  *        Prescaler = 71 → 1 MHz tick @ 72 MHz APB1 → 1 kHz PWM frequency
+  *        Prescaler = 71 → 1 MHz tick @ 72 MHz timer clock (APB1=36 MHz, but
+  *        RCC_TIMPRES_ACTIVATED forces TIMxCLK=HCLK) → 1 kHz PWM frequency
   * @param None
   * @retval None
   */
@@ -3168,7 +3143,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pins : EN_P_1V0_FPGA_Pin EN_P_1V8_FPGA_Pin EN_P_3V3_FPGA_Pin EN_P_5V0_ADAR_Pin
                            EN_P_3V3_ADAR12_Pin EN_P_3V3_ADAR34_Pin EN_P_3V3_ADTR_Pin EN_P_3V3_SW_Pin
-                           EN_P_3V3_ADAR12EN_P_3V3_VDD_SW_Pin */
+                           EN_P_3V3_VDD_SW_Pin */
   GPIO_InitStruct.Pin = EN_P_1V0_FPGA_Pin|EN_P_1V8_FPGA_Pin|EN_P_3V3_FPGA_Pin|EN_P_5V0_ADAR_Pin
                           |EN_P_3V3_ADAR12_Pin|EN_P_3V3_ADAR34_Pin|EN_P_3V3_ADTR_Pin|EN_P_3V3_SW_Pin
                           |EN_P_3V3_VDD_SW_Pin;
@@ -3177,7 +3152,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD8 PD9 PD10 PD11
+  /*Configure GPIO pins : PD8 PD9 PD10 PD11 PD12
                            STEPPER_CW_P_Pin STEPPER_CLK_P_Pin EN_DIS_RFPA_VDD_Pin EN_DIS_COOLING_Pin */
   GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12
                           |STEPPER_CW_P_Pin|STEPPER_CLK_P_Pin|EN_DIS_RFPA_VDD_Pin|EN_DIS_COOLING_Pin;
@@ -3186,7 +3161,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD12 PD13 PD14 PD15 */
+  /*Configure GPIO pins : PD13 PD14 PD15 */
   GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -3264,6 +3239,9 @@ void MPU_Config(void)
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
   MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
+  /* F-3.8: SRD=0x87 -> subregions {0,1,2,7} bypass NO_ACCESS (code/SRAM/APB/
+   * system region pass via background privileged default); subregions 3-6
+   * (0x6000_0000-0xDFFF_FFFF, FMC/QSPI/AHB3 aliases unused here) get blocked. */
   MPU_InitStruct.SubRegionDisable = 0x87;
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
   MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
@@ -3285,11 +3263,12 @@ void MPU_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
+  /* F-3.1: reset instead of hang. Error_Handler is invoked by every
+   * MX_*_Init() helper before MX_IWDG_Init() runs, so an infinite spin
+   * here would brick the MCU on any transient boot-time glitch with no
+   * watchdog to recover. SystemReset turns a hard-to-debug brick into a
+   * visible reboot loop. */
+  NVIC_SystemReset();
   /* USER CODE END Error_Handler_Debug */
 }
 
