@@ -96,6 +96,23 @@ PITCH_Y = float(os.environ.get("PITCH_Y_MM", "15.01"))
 DRIVEN_X = int(os.environ.get("DRIVEN_X", str(N_X // 2 - (N_X+1) % 2)))   # inner element
 DRIVEN_Y = int(os.environ.get("DRIVEN_Y", str(N_Y // 2 - (N_Y+1) % 2)))
 
+# DRIVEN_PORTS overrides DRIVEN_X/Y — comma/semicolon-separated list of "i,j"
+# pairs all excited in-phase with equal amplitude. Models perfect 1:8 corporate
+# splitter feeding an 8-patch sub-array. Example: "0,0;1,0;2,0;3,0;0,1;1,1;2,1;3,1"
+# is a 4-cols × 2-rows sub-array anchored in the corner.
+DRIVEN_PORTS_STR = os.environ.get("DRIVEN_PORTS", "")
+if DRIVEN_PORTS_STR:
+    pairs = []
+    for tok in DRIVEN_PORTS_STR.replace(';', ',').split(','):
+        tok = tok.strip()
+        if tok:
+            pairs.append(int(tok))
+    if len(pairs) % 2 != 0:
+        raise ValueError("DRIVEN_PORTS must be even count of integers (i,j pairs)")
+    DRIVEN_SET = set((pairs[k], pairs[k+1]) for k in range(0, len(pairs), 2))
+else:
+    DRIVEN_SET = {(DRIVEN_X, DRIVEN_Y)}
+
 # Array footprint extent (centre patch on origin)
 ARRAY_X_HALF = (N_X-1)/2 * PITCH_X + PATCH_W/2
 ARRAY_Y_HALF = (N_Y-1)/2 * PITCH_Y + PATCH_L/2
@@ -208,7 +225,7 @@ def run_case(sim_path, profile_cfg):
     # NaN/zero results for a different DRIVEN_X/DRIVEN_Y, that's the cause.
     for (feed_x, feed_y, i, j) in feed_locs:
         port_num = i * N_Y + j + 1
-        excite_amp = 1.0 if (i == DRIVEN_X and j == DRIVEN_Y) else 0.0
+        excite_amp = 1.0 if (i, j) in DRIVEN_SET else 0.0
         port = fdtd.AddLumpedPort(port_num, 50,
                                    [feed_x, feed_y, Z_GND + T_CU],
                                    [feed_x, feed_y, Z_PATCH],
@@ -224,19 +241,20 @@ def run_case(sim_path, profile_cfg):
 
     # ---- post-process ----
     freq = np.linspace(F_START, F_STOP, 401)
-    driven_port = next(p for (idx, p) in ports if idx == (DRIVEN_X, DRIVEN_Y))
     for (idx, p) in ports:
         p.CalcPort(sim_path, freq)
 
-    # S_jd (j is each port, d is driven). For driven port, S_dd = uf_ref/uf_inc.
-    # For other ports, S_jd = uf_ref_j / uf_inc_d (no incident wave at j from
-    # its own source since port j is unexcited).
+    # For each excited port: S = uf_ref/uf_inc (active reflection with all
+    # driven ports excited). For each non-excited port: S = uf_ref / <inc>
+    # where <inc> is the incident wave from any one driven port (used as
+    # reference; all driven ports have equal amplitude so any works).
+    ref_inc = next(p for (idx, p) in ports if idx in DRIVEN_SET).uf_inc
     S = {}
     for (idx, p) in ports:
-        if idx == (DRIVEN_X, DRIVEN_Y):
-            S[idx] = p.uf_ref / p.uf_inc
+        if idx in DRIVEN_SET:
+            S[idx] = p.uf_ref / p.uf_inc      # active S11
         else:
-            S[idx] = p.uf_ref / driven_port.uf_inc
+            S[idx] = p.uf_ref / ref_inc        # coupling out
 
     return freq, S, dt, ports
 
@@ -250,18 +268,25 @@ freq, S, dt, ports = run_case(sim_path, cfg)
 # At 10.5 GHz
 i_op = int(np.argmin(np.abs(freq - F0)))
 
+N_DRIVEN = len(DRIVEN_SET)
+
 # Print coupling grid
 print()
 print("=" * 70)
-print(f"  4x4 probe-fed array — driven port at ({DRIVEN_X},{DRIVEN_Y})")
+if N_DRIVEN == 1:
+    dx, dy = list(DRIVEN_SET)[0]
+    print(f"  {N_X}x{N_Y} probe-fed array — driven port at ({dx},{dy})")
+else:
+    sub_str = ' '.join(f"({i},{j})" for (i, j) in sorted(DRIVEN_SET))
+    print(f"  {N_X}x{N_Y} probe-fed array — {N_DRIVEN}-patch sub-array driven in-phase")
+    print(f"  Sub-array: {sub_str}")
 print(f"  Substrate: {H_PATCH_SUB} mm RO4350B, pitch {PITCH_X}x{PITCH_Y} mm")
 print(f"  Sim time: {dt:.1f} s")
 print("=" * 70)
 print()
-print(f"  S parameters at {F0/1e9:.2f} GHz (|S_j,driven| in dB):")
+print(f"  |S| at {F0/1e9:.2f} GHz, dB (driven ports show active S11):")
 print()
-# Layout grid as visual array (i is x-direction, j is y-direction)
-# Print y high to low so it matches usual visual orientation
+# Layout grid as visual array
 header = "      " + "".join(f"  i={i:1d}  " for i in range(N_X))
 print(header)
 for j in reversed(range(N_Y)):
@@ -269,38 +294,50 @@ for j in reversed(range(N_Y)):
     for i in range(N_X):
         val = abs(S[(i, j)][i_op])
         dB = 20*np.log10(val + 1e-30)
-        row += f"{dB:>7.1f}"
+        marker = "*" if (i, j) in DRIVEN_SET else " "
+        row += f"{marker}{dB:>6.1f}"
     print(row)
+print("    (* = driven port)")
 print()
-# Driven port S11 vs frequency
-S_dd = S[(DRIVEN_X, DRIVEN_Y)]
-S_dd_dB = 20*np.log10(np.abs(S_dd) + 1e-30)
-zin_d = 50.0 * (1 + S_dd) / (1 - S_dd)   # Z = Z0·(1+S)/(1-S)
-print(f"  Driven port active S11:")
-print(f"    @ 10.5 GHz : {S_dd_dB[i_op]:.2f} dB    Z = {zin_d[i_op].real:.1f} + j{zin_d[i_op].imag:.1f} Ω")
-# -10 dB BW around f0
-below = S_dd_dB <= -10.0
-if below[i_op]:
-    lo, hi = i_op, i_op
-    while lo > 0 and below[lo-1]:
-        lo -= 1
-    while hi < len(below)-1 and below[hi+1]:
-        hi += 1
-    print(f"    -10 dB BW : {(freq[hi]-freq[lo])/1e6:.0f} MHz "
-          f"({freq[lo]/1e9:.2f} – {freq[hi]/1e9:.2f} GHz)")
-else:
-    print(f"    -10 dB BW : <none at 10.5 GHz>")
 
-# Worst-case coupling (excluding driven port itself)
-couplings = [(idx, abs(S[idx][i_op])) for idx in S.keys() if idx != (DRIVEN_X, DRIVEN_Y)]
-couplings.sort(key=lambda x: -x[1])
+# For each driven port, report active S11 + Zin + per-port BW
+print(f"  Active S11 per driven port at {F0/1e9:.2f} GHz:")
+S11_at_op = []
+zin_at_op = []
+for (i, j) in sorted(DRIVEN_SET):
+    s = S[(i, j)]
+    s_dB_op = 20*np.log10(abs(s[i_op]) + 1e-30)
+    zin_p = 50.0 * (1 + s) / (1 - s)
+    print(f"    ({i},{j}) : S11 = {s_dB_op:>6.2f} dB    Z = {zin_p[i_op].real:5.1f} + j{zin_p[i_op].imag:+5.1f} Ω")
+    S11_at_op.append(s_dB_op)
+    zin_at_op.append(zin_p[i_op])
+
+if N_DRIVEN > 1:
+    print()
+    print(f"  Sub-array uniformity:")
+    print(f"    S11 min/max/avg : {min(S11_at_op):>6.2f} / {max(S11_at_op):>6.2f} / "
+          f"{sum(S11_at_op)/N_DRIVEN:>6.2f} dB")
+    R_vals = [z.real for z in zin_at_op]
+    X_vals = [z.imag for z in zin_at_op]
+    print(f"    R  min/max/avg  : {min(R_vals):>5.1f} / {max(R_vals):>5.1f} / "
+          f"{sum(R_vals)/N_DRIVEN:>5.1f} Ω")
+    print(f"    X  min/max/avg  : {min(X_vals):+5.1f} / {max(X_vals):+5.1f} / "
+          f"{sum(X_vals)/N_DRIVEN:+5.1f} Ω")
+    # Average port (what the ADAR channel "sees" through ideal 1:8 splitter)
+    Z_avg = sum(zin_at_op) / N_DRIVEN
+    print(f"    Z avg (= what ADAR channel sees through ideal 1:8 splitter):")
+    print(f"      Z = {Z_avg.real:.1f} + j{Z_avg.imag:+.1f} Ω, "
+          f"VSWR = {abs((Z_avg-50)/(Z_avg+50)) and (1+abs((Z_avg-50)/(Z_avg+50)))/(1-abs((Z_avg-50)/(Z_avg+50))):.2f}")
+
+# Coupling out (top non-driven ports)
+nondriven_couplings = [(idx, abs(S[idx][i_op])) for idx in S.keys()
+                       if idx not in DRIVEN_SET]
+nondriven_couplings.sort(key=lambda x: -x[1])
 print()
-print(f"  Top-5 strongest couplings to driven port at 10.5 GHz:")
-for idx, val in couplings[:5]:
-    di = idx[0] - DRIVEN_X
-    dj = idx[1] - DRIVEN_Y
+print(f"  Top-5 strongest couplings OUT of sub-array at {F0/1e9:.2f} GHz:")
+for idx, val in nondriven_couplings[:5]:
     dB = 20*np.log10(val + 1e-30)
-    print(f"    ({idx[0]},{idx[1]})  Δ=({di:+d},{dj:+d})  |S| = {dB:>6.1f} dB")
+    print(f"    ({idx[0]},{idx[1]})  |S| = {dB:>6.1f} dB")
 print("=" * 70)
 
 # Save S matrix CSV (full-band)
@@ -319,35 +356,25 @@ with open(os.path.join(OUT_DIR, "S_matrix.csv"), "w", newline="") as f:
             row += [mag_dB, phase]
         w.writerow(row)
 
-# Save driven-port S11 CSV
-with open(os.path.join(OUT_DIR, "S11_data.csv"), "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(["freq_Hz", "S11_dB", "Zin_real", "Zin_imag"])
-    for k in range(len(freq)):
-        w.writerow([freq[k], S_dd_dB[k], zin_d[k].real, zin_d[k].imag])
-
 # Coupling heatmap at 10.5 GHz
-fig, ax = plt.subplots(figsize=(6.5, 6))
+fig, ax = plt.subplots(figsize=(7, 6.5))
 grid = np.zeros((N_Y, N_X))
 for (i, j) in S.keys():
     grid[j, i] = 20*np.log10(abs(S[(i,j)][i_op]) + 1e-30)
-# Driven port floor (S11 is just one number, not a coupling) — set to NaN to highlight
-grid[DRIVEN_Y, DRIVEN_X] = np.nan
 im = ax.imshow(grid, origin='lower', cmap='viridis', aspect='equal')
 ax.set_xticks(range(N_X))
 ax.set_yticks(range(N_Y))
 ax.set_xlabel('i (x-pitch direction)')
 ax.set_ylabel('j (y-pitch direction)')
-ax.set_title(f'AERIS-10 4x4 array — coupling |S_j,({DRIVEN_X},{DRIVEN_Y})| at {F0/1e9:.2f} GHz')
-# Annotate cells
+ax.set_title(f'AERIS-10 {N_X}x{N_Y} probe-fed array — |S| at {F0/1e9:.2f} GHz')
 for j in range(N_Y):
     for i in range(N_X):
-        if (i, j) == (DRIVEN_X, DRIVEN_Y):
-            ax.text(i, j, "DRIVEN", ha='center', va='center', color='red',
-                    fontsize=9, fontweight='bold')
+        if (i, j) in DRIVEN_SET:
+            ax.text(i, j, f"DRIVEN\n{grid[j,i]:.1f} dB", ha='center', va='center',
+                    color='red', fontsize=8, fontweight='bold')
         else:
             ax.text(i, j, f"{grid[j,i]:.1f}\ndB", ha='center', va='center',
-                    color='white', fontsize=8)
+                    color='white', fontsize=7)
 plt.colorbar(im, ax=ax, label='|S| (dB)', shrink=0.7)
 fig.tight_layout()
 fig.savefig(os.path.join(OUT_DIR, "coupling_grid.png"), dpi=140)
