@@ -243,6 +243,11 @@ IWDG_HandleTypeDef hiwdg;
 ADF4382A_Manager lo_manager;
 extern SPI_HandleTypeDef hspi4;
 
+// AD9523 device handle. Retained at file scope so the recovery path can free
+// the previous instance before re-running setup (F-4.5: ad9523_setup() malloc's
+// a new dev + SPI desc each call; without retention each recovery cycle leaks).
+static struct ad9523_dev *g_ad9523_dev = NULL;
+
 //ADAR1000
 
 ADAR1000Manager adarManager;
@@ -1420,6 +1425,14 @@ static int configure_ad9523(void)
     int32_t ret;
     struct ad9523_dev *dev = NULL;
 
+    // F-4.5: recovery path re-runs configure_ad9523(); free the previous
+    // dev/SPI-desc allocation before letting setup() malloc a new pair.
+    if (g_ad9523_dev != NULL) {
+        DIAG("CLK", "Releasing previous ad9523_dev before re-setup");
+        ad9523_remove(g_ad9523_dev);
+        g_ad9523_dev = NULL;
+    }
+
     static struct ad9523_platform_data pdata;
     memset(&pdata, 0, sizeof(pdata));
 
@@ -1614,7 +1627,8 @@ static int configure_ad9523(void)
     ad9523_sync(dev);
     DIAG("CLK", "AD9523 configuration complete -- all outputs should be active");
 
-    // keep device pointer globally if needed (dev)
+    // F-4.5: retain the dev handle so recovery can free it before re-setup.
+    g_ad9523_dev = dev;
     return 0;
 }
 

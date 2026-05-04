@@ -704,7 +704,13 @@ int32_t ad9523_setup(struct ad9523_dev **device,
 			 AD9523_READBACK_CTRL,
 			 0x0);
 	ad9523_io_update(dev);
-	ad9523_calibrate(dev);
+	/* F-4.6: capture VCO calibration result. Without this, a failed
+	 * calibration (e.g. target VCO outside the 3.6-4.0 GHz band) is
+	 * silently swallowed and downstream relies on PLL2_LD alone in
+	 * ad9523_status(), which can pass spuriously. */
+	ret = ad9523_calibrate(dev);
+	if (ret < 0)
+		return ret;
 	ad9523_sync(dev);
 
 	*device = dev;
