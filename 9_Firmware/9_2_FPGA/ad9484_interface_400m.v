@@ -1,3 +1,5 @@
+`timescale 1ns / 1ps
+
 module ad9484_interface_400m (
     // ADC Physical Interface (LVDS)
     input wire [7:0] adc_d_p,        // ADC Data P
