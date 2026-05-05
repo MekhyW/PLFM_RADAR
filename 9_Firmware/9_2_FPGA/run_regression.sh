@@ -616,10 +616,45 @@ if [[ "$QUICK" -eq 0 ]]; then
         tb/tb_rx_final_reg.vvp \
         tb/tb_radar_receiver_final.v "${RECEIVER_RTL[@]}"
 
-    # Full system top (monitoring-only, legacy)
-    run_test "System Top (radar_system_tb)" \
-        tb/tb_system_reg.vvp \
-        tb/radar_system_tb.v "${SYSTEM_RTL[@]}"
+    # A6 end-to-end DSP -> host test (PR-Z). Replaces the two zero-assertion
+    # `radar_system_tb` smoke runs (USB_MODE=0 + USB_MODE=1) that this PR
+    # supersedes. Three stages:
+    #   1. gen_e2e_stimulus.py    - deterministic single-target stimulus
+    #   2. gen_e2e_expected.py    - bit-exact Python golden (fpga_model)
+    #   3. tb_e2e_dsp_to_host.v   - production-faithful chain
+    #                                (range_decim -> mti -> doppler -> dc_notch
+    #                                 -> cfar -> sync -> usb_data_interface_ft2232h)
+    #   4. tb_e2e_dsp_to_host_parse.py - radar_protocol round-trip + section asserts
+    printf "  %-45s " "E2E DSP-to-Host (PR-Z A6)"
+    set +e
+    a6_log=/tmp/a6_e2e_$$.log
+    {
+        python3 tb/cosim/gen_e2e_stimulus.py     && \
+        python3 tb/cosim/gen_e2e_expected.py     && \
+        iverilog -g2001 -DSIMULATION -o tb/tb_e2e_dsp_to_host.vvp \
+            tb/tb_e2e_dsp_to_host.v mti_canceller.v doppler_processor.v \
+            xfft_16.v fft_engine.v cfar_ca.v usb_data_interface_ft2232h.v \
+            edge_detector.v && \
+        timeout 300 vvp tb/tb_e2e_dsp_to_host.vvp && \
+        python3 tb/cosim/tb_e2e_dsp_to_host_parse.py
+    } > "$a6_log" 2>&1
+    a6_rc=$?
+    set -e
+    rm -f tb/tb_e2e_dsp_to_host.vvp
+    a6_tb_pass=$(grep -Ec '^[[:space:]]*\[PASS( [0-9]+)?\]' "$a6_log" || true)
+    a6_tb_fail=$(grep -Ec '^[[:space:]]*\[FAIL( [0-9]+)?\]' "$a6_log" || true)
+    a6_parse_overall_pass=$(grep -Ec '^\[OVERALL PASS\]' "$a6_log" || true)
+    if [[ "$a6_rc" -eq 0 && "$a6_tb_fail" -eq 0 && "$a6_parse_overall_pass" -ge 1 ]]; then
+        echo -e "${GREEN}PASS${NC} (TB pass=$a6_tb_pass + parse OVERALL PASS)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "${RED}FAIL${NC} (rc=$a6_rc, TB pass=$a6_tb_pass fail=$a6_tb_fail, parse=$a6_parse_overall_pass)"
+        ERRORS="$ERRORS\n  E2E DSP-to-Host: rc=$a6_rc"
+        echo "  ---- A6 last 30 lines of log ----"
+        tail -30 "$a6_log" | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$a6_log"
 
     # PR-I subsuites (replace tb_system_e2e). Each TB instantiates
     # radar_system_top with USB_MODE=1 (production FT2232H path) and
@@ -627,8 +662,10 @@ if [[ "$QUICK" -eq 0 ]]; then
     # cover all at once:
     #   tb_system_opcodes   - opcode dispatch via FT2232H send_cmd (fast)
     #   tb_system_mechanics - reset/RF/safety/CDC mechanics (fast)
-    #   tb_system_dataflow  - shallow TX + range-pipeline integration
-    #                         (slow; 18 ms sim, ~430-450 s wall on this host).
+    # Note: tb_system_dataflow was retired in PR-Z — its 3 liveness-only
+    # asserts (chirp_frames>0, range_valid>0, range_valid>=100) are now
+    # dominated by A6's stronger in-TB checks (egress-byte exact, doppler
+    # bit-exact vs Python golden, cfar class). ~7 min wall reclaimed.
     run_test "System Opcodes (tb_system_opcodes)" \
         tb/tb_system_opcodes_reg.vvp \
         tb/tb_system_opcodes.v "${SYSTEM_RTL[@]}"
@@ -636,19 +673,9 @@ if [[ "$QUICK" -eq 0 ]]; then
     run_test "System Mechanics (tb_system_mechanics)" \
         tb/tb_system_mechanics_reg.vvp \
         tb/tb_system_mechanics.v "${SYSTEM_RTL[@]}"
-
-    run_test --timeout=600 "System Dataflow (tb_system_dataflow)" \
-        tb/tb_system_dataflow_reg.vvp \
-        tb/tb_system_dataflow.v "${SYSTEM_RTL[@]}"
-
-    # USB_MODE=1 system top — different TB, kept as a structural smoke test.
-    run_test "System Top USB_MODE=1 (FT2232H)" \
-        tb/tb_system_ft2232h_reg.vvp \
-        -DUSB_MODE_1 \
-        tb/radar_system_tb.v "${SYSTEM_RTL[@]}"
 else
-    echo "  (skipped receiver integration + system top + opcodes/mechanics/dataflow + USB_MODE=1 — use without --quick)"
-    SKIP=$((SKIP + 6))
+    echo "  (skipped receiver integration + e2e dsp-to-host + opcodes/mechanics — use without --quick)"
+    SKIP=$((SKIP + 4))
 fi
 
 echo ""

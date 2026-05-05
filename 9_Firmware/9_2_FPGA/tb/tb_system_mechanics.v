@@ -10,7 +10,8 @@
 // Coverage:
 //   G1  Reset & initialization (system_status, ft601_wr_n, adc_pwdn)
 //   G2  Transmitter chain (DAC chirp, RF switch, TX/RX mixer)
-//        — G2.2 (new_chirp_frame) lives in tb_system_dataflow (needs 48 chirps).
+//        — G2.2 (new_chirp_frame at 48-chirp boundary) is exercised by
+//          tb_e2e_dsp_to_host (PR-Z A6) end-to-end.
 //   G3  Safety architecture (TX/RX mixer mutual exclusion, ADC pwdn, ADAR TR,
 //        mixer-disable propagation)
 //   G7.1 Rapid chirp toggle CDC stress (100MHz STM32 -> 120MHz TX)
@@ -360,7 +361,7 @@ initial begin
           "G1.4: adc_pwdn == 0 (ADC enabled)");
 
     // ====================================================================
-    // GROUP 2: TRANSMITTER CHAIN  (G2.2 moved to tb_system_dataflow)
+    // GROUP 2: TRANSMITTER CHAIN  (G2.2 covered by tb_e2e_dsp_to_host A6)
     // ====================================================================
     $display("\n--- Group 2: Transmitter Chain ---");
 

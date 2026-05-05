@@ -200,6 +200,12 @@ reg rx_detect_valid;      // Detection valid pulse (was rx_cfar_valid)
 // PR-G: 2-bit class register (registered alongside detect_flag for the same
 // CDC-clean handoff to usb_data_interface_ft2232h). Encoding per RP_DETECT_*.
 reg [`RP_DETECT_CLASS_WIDTH-1:0] rx_detect_class;
+// PR-Z A6 fix (Bug A): cfar emits per-cell coordinates during ST_CFAR_CMP via
+// detect_range/detect_doppler. Register them in lockstep with rx_detect_valid
+// so the USB RMW write address tracks cfar's own bin counter, not doppler's
+// stale (511, 47) tail-state.
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] rx_detect_range;
+reg [`RP_DOPPLER_BIN_WIDTH-1:0]   rx_detect_doppler;
 
 // Frame-complete signal from Doppler processor (for CFAR)
 wire rx_frame_complete;
@@ -755,13 +761,17 @@ cfar_ca cfar_inst (
 // (rx_detect_flag/valid are regs — drive them from CFAR combinationally)
 always @(posedge clk_100m_buf or negedge sys_reset_n) begin
     if (!sys_reset_n) begin
-        rx_detect_flag  <= 1'b0;
-        rx_detect_valid <= 1'b0;
-        rx_detect_class <= `RP_DETECT_NONE;
+        rx_detect_flag    <= 1'b0;
+        rx_detect_valid   <= 1'b0;
+        rx_detect_class   <= `RP_DETECT_NONE;
+        rx_detect_range   <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
+        rx_detect_doppler <= {`RP_DOPPLER_BIN_WIDTH{1'b0}};
     end else begin
-        rx_detect_flag  <= cfar_detect_flag;
-        rx_detect_valid <= cfar_detect_valid;
-        rx_detect_class <= cfar_detect_class;
+        rx_detect_flag    <= cfar_detect_flag;
+        rx_detect_valid   <= cfar_detect_valid;
+        rx_detect_class   <= cfar_detect_class;
+        rx_detect_range   <= cfar_detect_range;
+        rx_detect_doppler <= cfar_detect_doppler;
     end
 end
 
@@ -917,8 +927,15 @@ end else begin : gen_ft2232h
         .cfar_valid(usb_detect_valid),
 
         // Bulk frame protocol inputs
-        .range_bin_in(notched_range_bin),
-        .doppler_bin_in(notched_doppler_bin),
+        // PR-Z A6 (Bug A) fix: usb's RMW samples {range_bin_in, doppler_bin_in}
+        // when cfar_valid is high. cfar emits per-cell coords during CMP via
+        // rx_detect_range/doppler — mux them in alongside rx_detect_valid so the
+        // RMW write address tracks cfar (not doppler's stale 511/47 idle state).
+        // Doppler-magnitude write path uses the same inputs but is gated on
+        // doppler_valid; rx_detect_valid is mutually exclusive with doppler_valid
+        // (BUFFER vs CMP phases) so the mux is safe in both cases.
+        .range_bin_in(rx_detect_valid ? rx_detect_range   : notched_range_bin),
+        .doppler_bin_in(rx_detect_valid ? rx_detect_doppler : notched_doppler_bin),
         .frame_complete(rx_frame_complete),
 
         // FT2232H Interface

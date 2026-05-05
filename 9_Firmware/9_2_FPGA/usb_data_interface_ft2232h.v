@@ -427,6 +427,13 @@ reg        detect_clearing;     // 1 = bulk clear in progress
 
 reg [RANGE_BIN_BITS-1:0] range_write_counter;
 
+// Forward declaration of wr_done_pulse (driven by AUDIT-C12 block below at
+// line ~575) — used by the main writer always block to retrigger
+// detect_clearing after each USB transfer (PR-Z A6 Bug C fix).
+(* ASYNC_REG = "TRUE" *) reg [2:0] wr_done_sync;
+reg                                wr_done_prev;
+wire                               wr_done_pulse = wr_done_sync[2] ^ wr_done_prev;
+
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         frame_number       <= 16'd0;
@@ -550,9 +557,28 @@ always @(posedge clk or negedge reset_n) begin
         // already, or it hasn't and will read frame N+1's data at those
         // addresses, which is what the host wants when frames drop).
         if (!frame_filling && !frame_complete) begin
-            frame_filling     <= 1'b1;
-            detect_clearing   <= 1'b1;  // Clear detection BRAM for next frame
-            detect_clear_addr <= {FRAME_ADDR_W{1'b0}};
+            frame_filling <= 1'b1;
+        end
+
+        // PR-Z A6 (Bug C) fix: detect_clearing was previously kicked off 1
+        // cycle after frame_complete (right when frame_filling resumes). At
+        // 1 byte/cycle it takes 8192 clk cycles (81.92 µs) — but cfar's
+        // ST_CFAR_CMP starts emitting per-cell detect_valid pulses only
+        // ~520 cycles after frame_complete and runs continuously for
+        // ~73000 cycles. The first ~7672 cfar pulses (≈ first 4 doppler
+        // columns) overlapped the clearing pass and were silently dropped
+        // by the `!detect_clearing` guard on the RMW start condition,
+        // wiping cells (range, doppler 0..3) from the wire.
+        //
+        // Trigger clearing on wr_done_pulse instead: that fires after USB
+        // has finished reading the previous frame's detect BRAM, so the
+        // clear runs in the dead zone between frames (~480k cycles wide
+        // at 178 fps) and finishes long before the next frame's cfar CMP
+        // starts. First frame after reset relies on BRAM init=0 (Vivado
+        // default; SIM init below for iverilog).
+        if (!detect_clearing && wr_done_pulse) begin
+            detect_clearing   <= 1'b1;
+            detect_clear_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
         end
     end
 end
@@ -570,9 +596,9 @@ end
 reg        frame_pending;
 reg [6:0]  frame_drop_count;   // 7-bit, saturates at 127
 
-(* ASYNC_REG = "TRUE" *) reg [2:0] wr_done_sync;
-reg                                wr_done_prev;
-wire                               wr_done_pulse = wr_done_sync[2] ^ wr_done_prev;
+// wr_done_sync / wr_done_prev / wr_done_pulse declared earlier (~line 430)
+// because the main writer block now uses wr_done_pulse for detect_clearing
+// retrigger (PR-Z A6 Bug C fix).
 
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
@@ -1001,6 +1027,14 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         if (wr_byte_idx[3:0] == 4'd8) begin
                             wr_byte_idx   <= 16'd0;
                             wr_byte_phase <= 1'b0;
+                            // PR-Z A6 (Bug B) fix: BRAM read has 1-cycle latency.
+                            // Pre-load detect_rd_addr=1 and det_doppler_byte_idx=1
+                            // so the first WR_DETECT_DATA cycle emits bram[0]
+                            // (already settled at addr 0 since WR_IDLE) while
+                            // BRAM begins fetching bram[1] for the second emit.
+                            // Harmless when next state is not WR_DETECT_DATA.
+                            det_doppler_byte_idx <= 4'd1;
+                            detect_rd_addr       <= {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
                             // Decide next section based on stream flags
                             if (stream_flags_snapshot[0])  // stream_range
                                 wr_state <= WR_RANGE_DATA;
@@ -1043,6 +1077,11 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                             dop_range_idx   <= {RANGE_BIN_BITS{1'b0}};
                             dop_doppler_idx <= {DOPPLER_BIN_BITS{1'b0}};
                             mag_rd_addr     <= {FRAME_ADDR_W{1'b0}};  // {range=0, doppler=0}
+                            // PR-Z A6 (Bug B) fix: pre-load detect read pipeline
+                            // when bypassing doppler (stream_flags[1]=0). See
+                            // WR_FRAME_HDR exit comment for details.
+                            det_doppler_byte_idx <= 4'd1;
+                            detect_rd_addr       <= {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
                             if (stream_flags_snapshot[1])
                                 wr_state <= WR_DOPPLER_DATA;
                             else if (stream_flags_snapshot[2])
@@ -1089,8 +1128,16 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                             wr_byte_idx          <= 16'd0;
                             wr_byte_phase        <= 1'b0;
                             det_range_idx        <= {RANGE_BIN_BITS{1'b0}};
-                            det_doppler_byte_idx <= 4'd0;
-                            detect_rd_addr       <= {DETECT_BYTE_ADDR_W{1'b0}};
+                            // PR-Z A6 (Bug B) fix: BRAM read has 1-cycle latency.
+                            // Pre-load detect_rd_addr=1 and det_doppler_byte_idx=1
+                            // so the first WR_DETECT_DATA cycle emits bram[0]
+                            // (already settled — detect_rd_addr was 0 since
+                            // WR_IDLE) while BRAM begins fetching bram[1] for
+                            // the second emit. Without this pre-load the wire
+                            // shifts +1 byte (= +4 doppler bins) across the
+                            // entire detect section.
+                            det_doppler_byte_idx <= 4'd1;
+                            detect_rd_addr       <= {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
                             if (stream_flags_snapshot[2])
                                 wr_state <= WR_DETECT_DATA;
                             else
@@ -1202,6 +1249,27 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         end
     end
 end
+
+// ============================================================================
+// SIMULATION ONLY: BRAM init
+// ============================================================================
+// Vivado-inferred BRAM18 initializes to all-zero by default in synthesis,
+// but iverilog leaves `reg [...] mem [...]` at X. The Bug C fix (detect
+// clearing now triggers on wr_done_pulse, not frame_complete + 1) means
+// the first frame after reset relies on this init to give clean cells —
+// otherwise wire bytes that cfar never wrote to would read X.
+// ============================================================================
+`ifdef SIMULATION
+integer init_idx;
+initial begin
+    for (init_idx = 0; init_idx <= DETECT_BYTE_LAST; init_idx = init_idx + 1)
+        detect_bram[init_idx] = 8'd0;
+    for (init_idx = 0; init_idx < FRAME_CELLS; init_idx = init_idx + 1)
+        doppler_mag_bram[init_idx] = 16'd0;
+    for (init_idx = 0; init_idx < NUM_RANGE_BINS; init_idx = init_idx + 1)
+        range_bram[init_idx] = 16'd0;
+end
+`endif
 
 // ============================================================================
 // TX-N9: payload-hold checker (simulation only)
