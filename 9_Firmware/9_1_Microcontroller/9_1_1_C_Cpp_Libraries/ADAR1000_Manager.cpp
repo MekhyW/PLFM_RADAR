@@ -373,10 +373,13 @@ void ADAR1000Manager::setADTR1107Mode(BeamDirection direction) {
 
         // Step 5: TR switch state is FPGA-driven. TR_SOURCE=1 is set once in
         // initializeSingleDevice, so the chip already follows adar_tr_x.
-        // Only BIAS_EN needs to be asserted here.
-        DIAG("BF", "  BIAS_EN (TR source still = FPGA adar_tr_x)");
+        // Audit F-6.3: clear LNA_BIAS_OUT_EN before asserting BIAS_EN so a
+        // prior RX-armed state can't leave both PA and LNA bias outputs hot
+        // simultaneously through a TX→RX→TX (or RX→TX) transition.
+        DIAG("BF", "  clear LNA_BIAS_OUT_EN, set BIAS_EN (TR source still = FPGA adar_tr_x)");
         for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-            adarSetBit(dev, REG_MISC_ENABLES, 5, BROADCAST_OFF); // BIAS_EN
+            adarResetBit(dev, REG_MISC_ENABLES, 4, BROADCAST_OFF); // LNA_BIAS_OUT_EN -> 0
+            adarSetBit(dev, REG_MISC_ENABLES, 5, BROADCAST_OFF);   // BIAS_EN -> 1
         }
         DIAG("BF", "  ADTR1107 TX mode complete");
 
@@ -414,10 +417,13 @@ void ADAR1000Manager::setADTR1107Mode(BeamDirection direction) {
         HAL_Delay(5);
 
         // Step 5: TR switch state is FPGA-driven (TR_SOURCE left at 1).
-        // Only LNA_BIAS_OUT_EN needs to be asserted here.
-        DIAG("BF", "  LNA_BIAS_OUT_EN (TR source still = FPGA adar_tr_x)");
+        // Audit F-6.3: clear BIAS_EN before asserting LNA_BIAS_OUT_EN to avoid
+        // both PA and LNA bias outputs being enabled at the same time on a
+        // TX→RX (or RX→TX→RX) transition.
+        DIAG("BF", "  clear BIAS_EN, set LNA_BIAS_OUT_EN (TR source still = FPGA adar_tr_x)");
         for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-            adarSetBit(dev, REG_MISC_ENABLES, 4, BROADCAST_OFF); // LNA_BIAS_OUT_EN
+            adarResetBit(dev, REG_MISC_ENABLES, 5, BROADCAST_OFF); // BIAS_EN -> 0
+            adarSetBit(dev, REG_MISC_ENABLES, 4, BROADCAST_OFF);   // LNA_BIAS_OUT_EN -> 1
         }
         DIAG("BF", "  ADTR1107 RX mode complete");
     }
