@@ -1,19 +1,31 @@
 /*******************************************************************************
  * test_bug5_fine_phase_gpio_only.c
  *
- * Bug #5 (FIXED): ADF4382A_SetFinePhaseShift() was a GPIO-only placeholder.
- * For intermediate duty_cycle values it just set GPIO HIGH — same as max.
+ * F-5.1: SetFinePhaseShift / SetPhaseShift use binary GPIO only.
  *
- * Fix: Intermediate duty cycles now use TIM3 PWM output (CH2 for TX, CH3 for
- * RX). The PWM output is low-pass filtered externally to produce a DC voltage
- * proportional to the delay. Edge cases (0 and max) still use static GPIO.
+ * Schematic-verified rationale:
+ *   - MCU is STM32F746ZGT7. PG7 (RX_DELADJ) and PG13 (TX_DELADJ) have no TIM3
+ *     alternate function (Port G AFs are FMC/ETH/USART6/SAI2/SDMMC2 — no
+ *     TIMx routes). Even configuring AF mode would have no valid AF code.
+ *   - FreqSynth board: DELADJ net has only a 200 kOhm pulldown (R22 on TX,
+ *     R35 on RX). No series-R + shunt-C low-pass filter exists on the board,
+ *     so a PWM-to-DC scheme cannot work as built.
  *
- * Test strategy (post-fix):
- *   1. duty=0 → PWM stopped, GPIO LOW (no change).
- *   2. duty=MAX → PWM stopped, GPIO HIGH (no change).
- *   3. duty=500 (intermediate) → SPY_TIM_SET_COMPARE + SPY_TIM_PWM_START
- *      recorded, NO static GPIO write for the DELADJ pin.
- *   4. Verify compare value matches the duty cycle.
+ * Prior history:
+ *   - 5fbe97f (2026-03-09 initial upload): GPIO-only with explicit TODO
+ *     "// In a real system, you would generate a PWM signal on DELADJ pin".
+ *   - 3979693 (2026-03-19 "Bug #5 fix"): added HAL_TIM_PWM_Start scaffolding
+ *     calling htim3 (which didn't exist yet) — false-fix.
+ *   - c466021 (2026-03-19 "B15 fix"): added MX_TIM3_Init to define htim3 —
+ *     timer ran internally but the pin's AF mux was never enabled.
+ *   - This commit: revert to binary GPIO matching the schematic's actual
+ *     intent. Delete the PWM scaffolding and htim3 entirely.
+ *
+ * Test strategy (binary):
+ *   1. duty=0          -> 1 GPIO write LOW   (no PWM API touched)
+ *   2. duty=MAX        -> 1 GPIO write HIGH  (no PWM API touched)
+ *   3. duty=500 (any nonzero) -> 1 GPIO write HIGH (no PWM API touched)
+ *   4. RX device (1)   -> writes RX_DELADJ_Pin (PG7), not TX_DELADJ_Pin (PG13)
  ******************************************************************************/
 #include "adf4382a_manager.h"
 #include <assert.h>
@@ -24,98 +36,88 @@ int main(void)
     ADF4382A_Manager mgr;
     int ret;
 
-    printf("=== Bug #5 (FIXED): SetFinePhaseShift uses TIM PWM ===\n");
+    printf("=== F-5.1: SetFinePhaseShift uses binary GPIO (no PWM) ===\n");
 
-    /* Setup: init manager */
+    /* Setup */
     spy_reset();
     ret = ADF4382A_Manager_Init(&mgr, SYNC_METHOD_TIMED);
     assert(ret == ADF4382A_MANAGER_OK);
 
-    /* ---- Test A: duty_cycle=0 → PWM stopped, GPIO LOW ---- */
+    /* ---- Test A: duty=0 -> GPIO LOW, no PWM ---- */
     spy_reset();
     ret = ADF4382A_SetFinePhaseShift(&mgr, 0, 0);
     assert(ret == ADF4382A_MANAGER_OK);
 
-    int pwm_stop_count = spy_count_type(SPY_TIM_PWM_STOP);
-    int gpio_writes = spy_count_type(SPY_GPIO_WRITE);
-    printf("  duty=0: PWM_STOP=%d GPIO_WRITE=%d\n", pwm_stop_count, gpio_writes);
-    assert(pwm_stop_count == 1);  /* stop PWM before driving GPIO */
-    assert(gpio_writes >= 1);     /* at least one GPIO write (LOW) */
+    int gpio_writes  = spy_count_type(SPY_GPIO_WRITE);
+    int pwm_starts   = spy_count_type(SPY_TIM_PWM_START);
+    int pwm_stops    = spy_count_type(SPY_TIM_PWM_STOP);
+    int set_compares = spy_count_type(SPY_TIM_SET_COMPARE);
+    printf("  duty=0: GPIO_WRITE=%d PWM_START=%d PWM_STOP=%d SET_COMPARE=%d\n",
+           gpio_writes, pwm_starts, pwm_stops, set_compares);
+    assert(gpio_writes == 1);
+    assert(pwm_starts == 0 && pwm_stops == 0 && set_compares == 0);
 
-    /* Verify the GPIO write is LOW */
     int idx = spy_find_nth(SPY_GPIO_WRITE, 0);
     const SpyRecord *r = spy_get(idx);
     assert(r != NULL && r->value == GPIO_PIN_RESET);
-    printf("  PASS: duty=0 → PWM stopped + GPIO LOW\n");
+    assert(r->pin == TX_DELADJ_Pin);
+    printf("  PASS: duty=0 -> GPIO LOW on TX_DELADJ_Pin (PG13), no PWM\n");
 
-    /* ---- Test B: duty_cycle=MAX → PWM stopped, GPIO HIGH ---- */
+    /* ---- Test B: duty=MAX -> GPIO HIGH, no PWM ---- */
     spy_reset();
     ret = ADF4382A_SetFinePhaseShift(&mgr, 0, DELADJ_MAX_DUTY_CYCLE);
     assert(ret == ADF4382A_MANAGER_OK);
 
-    pwm_stop_count = spy_count_type(SPY_TIM_PWM_STOP);
-    gpio_writes = spy_count_type(SPY_GPIO_WRITE);
-    printf("  duty=MAX(%d): PWM_STOP=%d GPIO_WRITE=%d\n",
-           DELADJ_MAX_DUTY_CYCLE, pwm_stop_count, gpio_writes);
-    assert(pwm_stop_count == 1);
-    assert(gpio_writes >= 1);
+    gpio_writes  = spy_count_type(SPY_GPIO_WRITE);
+    pwm_starts   = spy_count_type(SPY_TIM_PWM_START);
+    pwm_stops    = spy_count_type(SPY_TIM_PWM_STOP);
+    set_compares = spy_count_type(SPY_TIM_SET_COMPARE);
+    printf("  duty=MAX(%d): GPIO_WRITE=%d PWM_START=%d PWM_STOP=%d SET_COMPARE=%d\n",
+           DELADJ_MAX_DUTY_CYCLE, gpio_writes, pwm_starts, pwm_stops, set_compares);
+    assert(gpio_writes == 1);
+    assert(pwm_starts == 0 && pwm_stops == 0 && set_compares == 0);
 
     idx = spy_find_nth(SPY_GPIO_WRITE, 0);
     r = spy_get(idx);
     assert(r != NULL && r->value == GPIO_PIN_SET);
-    printf("  PASS: duty=MAX → PWM stopped + GPIO HIGH\n");
+    assert(r->pin == TX_DELADJ_Pin);
+    printf("  PASS: duty=MAX -> GPIO HIGH on TX_DELADJ_Pin (PG13), no PWM\n");
 
-    /* ---- Test C: duty_cycle=500 (intermediate) → TIM PWM ---- */
+    /* ---- Test C: duty=500 (intermediate) -> GPIO HIGH (binary mapping) ---- */
     spy_reset();
-    ret = ADF4382A_SetFinePhaseShift(&mgr, 0, 500);  /* device=0 (TX) */
+    ret = ADF4382A_SetFinePhaseShift(&mgr, 0, 500);
     assert(ret == ADF4382A_MANAGER_OK);
 
-    int pwm_start_count = spy_count_type(SPY_TIM_PWM_START);
-    int set_compare_count = spy_count_type(SPY_TIM_SET_COMPARE);
-    gpio_writes = spy_count_type(SPY_GPIO_WRITE);
-    printf("  duty=500: PWM_START=%d SET_COMPARE=%d GPIO_WRITE=%d\n",
-           pwm_start_count, set_compare_count, gpio_writes);
-    assert(pwm_start_count == 1);
-    assert(set_compare_count == 1);
-    assert(gpio_writes == 0);  /* No static GPIO write for intermediate */
+    gpio_writes  = spy_count_type(SPY_GPIO_WRITE);
+    pwm_starts   = spy_count_type(SPY_TIM_PWM_START);
+    set_compares = spy_count_type(SPY_TIM_SET_COMPARE);
+    printf("  duty=500 (intermediate): GPIO_WRITE=%d PWM_START=%d SET_COMPARE=%d\n",
+           gpio_writes, pwm_starts, set_compares);
+    assert(gpio_writes == 1);
+    assert(pwm_starts == 0 && set_compares == 0);
 
-    /* Verify compare value is 500 */
-    idx = spy_find_nth(SPY_TIM_SET_COMPARE, 0);
+    idx = spy_find_nth(SPY_GPIO_WRITE, 0);
     r = spy_get(idx);
-    assert(r != NULL);
-    printf("  SET_COMPARE value=%u (expected 500)\n", r->value);
-    assert(r->value == 500);
+    assert(r != NULL && r->value == GPIO_PIN_SET);
+    printf("  PASS: duty=500 -> GPIO HIGH (binary: any nonzero -> HIGH)\n");
 
-    /* Verify TIM channel is CH2 (TX device = 0 → TIM_CHANNEL_2 = 0x04) */
-    idx = spy_find_nth(SPY_TIM_PWM_START, 0);
-    r = spy_get(idx);
-    assert(r != NULL);
-    printf("  PWM_START channel=0x%02X (expected 0x%02X = TIM_CHANNEL_2)\n",
-           r->pin, TIM_CHANNEL_2);
-    assert(r->pin == TIM_CHANNEL_2);
-    printf("  PASS: duty=500 → TIM PWM with correct compare value\n");
-
-    /* ---- Test D: RX device (1) uses TIM_CHANNEL_3 ---- */
+    /* ---- Test D: RX device (1) writes RX_DELADJ_Pin, not TX ---- */
     spy_reset();
-    ret = ADF4382A_SetFinePhaseShift(&mgr, 1, 750);  /* device=1 (RX) */
+    ret = ADF4382A_SetFinePhaseShift(&mgr, 1, 750);
     assert(ret == ADF4382A_MANAGER_OK);
 
-    idx = spy_find_nth(SPY_TIM_PWM_START, 0);
+    idx = spy_find_nth(SPY_GPIO_WRITE, 0);
     r = spy_get(idx);
     assert(r != NULL);
-    printf("  RX PWM_START channel=0x%02X (expected 0x%02X = TIM_CHANNEL_3)\n",
-           r->pin, TIM_CHANNEL_3);
-    assert(r->pin == TIM_CHANNEL_3);
-
-    idx = spy_find_nth(SPY_TIM_SET_COMPARE, 0);
-    r = spy_get(idx);
-    assert(r != NULL && r->value == 750);
-    printf("  RX SET_COMPARE value=%u (expected 750)  OK\n", r->value);
-    printf("  PASS: RX device uses TIM_CHANNEL_3 with correct compare\n");
+    printf("  RX duty=750: pin=0x%04X (expected 0x%04X = RX_DELADJ_Pin/PG7), value=%u\n",
+           r->pin, RX_DELADJ_Pin, r->value);
+    assert(r->pin == RX_DELADJ_Pin);
+    assert(r->value == GPIO_PIN_SET);
+    printf("  PASS: RX device writes PG7 with HIGH (binary)\n");
 
     /* Cleanup */
     ADF4382A_Manager_Deinit(&mgr);
 
-    printf("\n=== Bug #5: ALL TESTS PASSED (post-fix) ===\n\n");
+    printf("\n=== F-5.1: ALL TESTS PASSED (binary DELADJ) ===\n\n");
     return 0;
 }

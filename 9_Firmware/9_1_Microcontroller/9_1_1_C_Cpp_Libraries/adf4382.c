@@ -2106,15 +2106,21 @@ error_dev:
  * @brief Free resources allocated for ADF4382
  * @param dev 	- The device structure.
  * @return 	- 0 in case of success or negative error code.
+ *
+ * F-5.4: upstream ADI driver had `if (ret) no_os_free(dev); return 0;` —
+ * leaked dev on success and lost the SPI-remove error. Now: NULL guard,
+ * unconditional free of dev struct, and propagate the actual return code.
  */
 int adf4382_remove(struct adf4382_dev *dev)
 {
 	int ret;
 
-	ret = no_os_spi_remove(dev->spi_desc);
-	if (ret)
-		no_os_free(dev);
+	if (!dev)
+		return -EINVAL;
 
-	return 0;
+	ret = no_os_spi_remove(dev->spi_desc);
+	no_os_free(dev);
+
+	return ret;
 }
 

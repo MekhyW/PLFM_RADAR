@@ -51,8 +51,7 @@ TESTS_WITH_REAL := test_bug1_timed_sync_init_ordering \
                    test_bug4_phase_shift_before_check \
                    test_bug5_fine_phase_gpio_only \
                    test_bug9_platform_ops_null \
-                   test_bug10_spi_cs_not_toggled \
-                   test_bug15_htim3_dangling_extern
+                   test_bug10_spi_cs_not_toggled
 
 # Tests that only need mocks (extracted patterns / static analysis)
 TESTS_MOCK_ONLY := test_bug2_ad9523_double_setup \
@@ -95,7 +94,7 @@ TESTS_GPS := test_um982_gps
 ALL_TESTS := $(TESTS_WITH_REAL) $(TESTS_MOCK_ONLY) $(TESTS_STANDALONE) $(TESTS_WITH_PLATFORM) $(TESTS_WITH_CXX) $(TESTS_GPS)
 
 .PHONY: all build test clean \
-        $(addprefix test_,bug1 bug2 bug3 bug4 bug5 bug6 bug7 bug8 bug9 bug10 bug11 bug12 bug13 bug14 bug15) \
+        $(addprefix test_,bug1 bug2 bug3 bug4 bug5 bug6 bug7 bug8 bug9 bug10 bug11 bug12 bug13 bug14) \
         test_gap3_estop test_gap3_iwdg test_gap3_temp test_gap3_idq test_gap3_order \
         test_gap3_overtemp test_gap3_wdog
 
@@ -301,9 +300,6 @@ test_bug13: test_bug13_dac2_adc_buffer_mismatch
 
 test_bug14: test_bug14_diag_section_args
 	./test_bug14_diag_section_args
-
-test_bug15: test_bug15_htim3_dangling_extern
-	./test_bug15_htim3_dangling_extern
 
 test_gap3_estop: test_gap3_emergency_stop_rails
 	./test_gap3_emergency_stop_rails

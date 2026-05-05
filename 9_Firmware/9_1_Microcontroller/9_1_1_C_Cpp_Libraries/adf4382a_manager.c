@@ -8,17 +8,16 @@
 // External SPI handle
 extern SPI_HandleTypeDef hspi4;
 
-// External timer for DELADJ PWM (configured in CubeMX, period = DELADJ_MAX_DUTY_CYCLE)
-// TX DELADJ uses TIM3_CH2, RX DELADJ uses TIM3_CH3
-extern TIM_HandleTypeDef htim3;
+// F-5.1: DELADJ is hardware-binary on AERIS-10. PG7 (RX) / PG13 (TX) on
+// STM32F746ZGT7 have no TIM3 alternate function (Port G has FMC/ETH/USART6
+// AFs only) and the FreqSynth-board DELADJ net has only a 200 kOhm pulldown
+// (R22, R35) — no series-R + shunt-C low-pass filter. There is no path for
+// PWM-to-DC. Earlier "Bug #5" + "B15" PWM scaffolding has been reverted.
 
 // Static function prototypes
 static void set_chip_enable(uint16_t ce_pin, bool state);
 static void set_deladj_pin(uint8_t device, bool state);
 static void set_delstr_pin(uint8_t device, bool state);
-static void start_deladj_pwm(uint8_t device, uint16_t duty_cycle);
-static void stop_deladj_pwm(uint8_t device);
-static uint16_t phase_ps_to_duty_cycle(uint16_t phase_ps);
 
 int ADF4382A_Manager_Init(ADF4382A_Manager *manager, SyncMethod method)
 {
@@ -31,14 +30,30 @@ int ADF4382A_Manager_Init(ADF4382A_Manager *manager, SyncMethod method)
     static stm32_spi_extra spi_rx_extra;
     
     DIAG_SECTION("ADF4382A LO MANAGER INIT");
-    DIAG("LO", "Init called with sync_method=%d (%s)",
-         method, (method == SYNC_METHOD_TIMED) ? "TIMED" : "EZSYNC");
+    /* F-5.10: SYNC_METHOD_TIMED is the only valid value after C-14a deleted
+     * SYNC_METHOD_EZSYNC. The old ternary printed a stale "EZSYNC" string. */
+    DIAG("LO", "Init called with sync_method=TIMED (%d)", method);
 
     if (!manager) {
         DIAG_ERR("LO", "Init called with NULL manager pointer");
         return ADF4382A_MANAGER_ERROR_INVALID;
     }
-    
+
+    /* F-5.3: free any prior tx_dev/rx_dev before re-allocating. The struct
+     * persists across re-init (recovery path in main.cpp on TX/RX unlock
+     * calls Manager_Init again), and the previous adf4382_dev allocations
+     * would otherwise leak. Mirrors F-4.5 fix for AD9523. */
+    if (manager->tx_dev != NULL) {
+        DIAG("LO", "Releasing prior tx_dev before re-init");
+        adf4382_remove(manager->tx_dev);
+        manager->tx_dev = NULL;
+    }
+    if (manager->rx_dev != NULL) {
+        DIAG("LO", "Releasing prior rx_dev before re-init");
+        adf4382_remove(manager->rx_dev);
+        manager->rx_dev = NULL;
+    }
+
     // Initialize manager structure
     manager->tx_dev = NULL;
     manager->rx_dev = NULL;
@@ -84,12 +99,20 @@ int ADF4382A_Manager_Init(ADF4382A_Manager *manager, SyncMethod method)
          TX_CS_Pin, RX_CS_Pin, (unsigned long)ADF4382A_SPI_SPEED_HZ,
          (const void*)manager->spi_tx_param.platform_ops);
 
-    // Configure TX parameters (10.5 GHz)
+    /* F-5.2: split ref_div per device.
+     *  TX target 10.5 GHz / PFD = 35 (integer mode). PFD = 300/1 = 300 MHz,
+     *      under the 625 MHz integer-mode spec. ref_div = 1.
+     *  RX target 10.38 GHz / PFD = 34.6 (fractional mode). The ADF4382
+     *      datasheet caps fractional-mode PFD at 250 MHz
+     *      (ADF4382_PFD_FREQ_FRAC_MAX); 300 MHz exceeds spec. Use ref_div=2
+     *      so PFD = 300/2 = 150 MHz, in spec.
+     */
+    // Configure TX parameters (10.5 GHz, integer mode)
     memset(&tx_param, 0, sizeof(tx_param));
     tx_param.spi_3wire_en = 0;
     tx_param.cmos_3v3 = 1;
     tx_param.ref_freq_hz = REF_FREQ_HZ;
-    tx_param.ref_div = 1;
+    tx_param.ref_div = 1;                  // PFD = 300 MHz (integer mode)
     tx_param.ref_doubler_en = false;
     tx_param.freq = TX_FREQ_HZ;
     tx_param.id = ID_ADF4382A;
@@ -97,13 +120,13 @@ int ADF4382A_Manager_Init(ADF4382A_Manager *manager, SyncMethod method)
     tx_param.bleed_word = 1000;
     tx_param.ld_count = 0x07;
     tx_param.spi_init = &manager->spi_tx_param;
-    
-    // Configure RX parameters (10.38 GHz)
+
+    // Configure RX parameters (10.38 GHz, fractional mode)
     memset(&rx_param, 0, sizeof(rx_param));
     rx_param.spi_3wire_en = 0;
     rx_param.cmos_3v3 = 1;
     rx_param.ref_freq_hz = REF_FREQ_HZ;
-    rx_param.ref_div = 1;
+    rx_param.ref_div = 2;                  // PFD = 150 MHz (fractional-mode in-spec)
     rx_param.ref_doubler_en = false;
     rx_param.freq = RX_FREQ_HZ;
     rx_param.id = ID_ADF4382A;
@@ -111,13 +134,17 @@ int ADF4382A_Manager_Init(ADF4382A_Manager *manager, SyncMethod method)
     rx_param.bleed_word = 1200;
     rx_param.ld_count = 0x07;
     rx_param.spi_init = &manager->spi_rx_param;
-    
-    DIAG("LO", "TX target: %llu Hz, ref=%llu Hz, cp_i=%d, bleed=%d",
+
+    DIAG("LO", "TX target: %llu Hz, ref=%llu Hz, ref_div=%u -> PFD=%llu Hz, cp_i=%d",
          (unsigned long long)TX_FREQ_HZ, (unsigned long long)REF_FREQ_HZ,
-         tx_param.cp_i, tx_param.bleed_word);
-    DIAG("LO", "RX target: %llu Hz, ref=%llu Hz, cp_i=%d, bleed=%d",
+         tx_param.ref_div,
+         (unsigned long long)REF_FREQ_HZ / tx_param.ref_div,
+         tx_param.cp_i);
+    DIAG("LO", "RX target: %llu Hz, ref=%llu Hz, ref_div=%u -> PFD=%llu Hz, cp_i=%d",
          (unsigned long long)RX_FREQ_HZ, (unsigned long long)REF_FREQ_HZ,
-         rx_param.cp_i, rx_param.bleed_word);
+         rx_param.ref_div,
+         (unsigned long long)REF_FREQ_HZ / rx_param.ref_div,
+         rx_param.cp_i);
 
     // Enable chips
     DIAG("LO", "Asserting CE pins (TX + RX)...");
@@ -398,10 +425,13 @@ int ADF4382A_CheckLockStatus(ADF4382A_Manager *manager, bool *tx_locked, bool *r
                   rx_gpio_locked ? "HIGH" : "LOW");
     }
 
-    // Use both register and GPIO status
-    *tx_locked = tx_reg_locked && tx_gpio_locked;
-    *rx_locked = rx_reg_locked && rx_gpio_locked;
-    
+    /* F-5.8: register reg[0x58] LOCKED bit is authoritative for lock state.
+     * GPIO disagreement is logged via DIAG_WARN above but does not flip the
+     * result — a mis-routed GPIO LKDET (or wrong MUXOUT) would otherwise
+     * trigger false-unlock recovery loops via main.cpp's error dispatch. */
+    *tx_locked = tx_reg_locked;
+    *rx_locked = rx_reg_locked;
+
     return ADF4382A_MANAGER_OK;
 }
 
@@ -470,30 +500,24 @@ int ADF4382A_SetPhaseShift(ADF4382A_Manager *manager, uint16_t tx_phase_ps, uint
         return ADF4382A_MANAGER_ERROR_NOT_INIT;
     }
 
-    // Clamp phase shift values
     tx_phase_ps = (tx_phase_ps > PHASE_SHIFT_MAX_PS) ? PHASE_SHIFT_MAX_PS : tx_phase_ps;
     rx_phase_ps = (rx_phase_ps > PHASE_SHIFT_MAX_PS) ? PHASE_SHIFT_MAX_PS : rx_phase_ps;
 
-    DIAG("LO", "SetPhaseShift: TX=%d ps, RX=%d ps", tx_phase_ps, rx_phase_ps);
+    DIAG("LO", "SetPhaseShift: TX=%d ps, RX=%d ps (binary DELADJ — any nonzero -> HIGH)",
+         tx_phase_ps, rx_phase_ps);
 
-    // Convert phase shift to duty cycle and apply
     if (tx_phase_ps != manager->tx_phase_shift_ps) {
-        uint16_t duty_cycle = phase_ps_to_duty_cycle(tx_phase_ps);
-        DIAG("LO", "TX phase: %d ps -> duty_cycle=%d/%d (TIM3 CH2 PWM)",
-                  tx_phase_ps, duty_cycle, DELADJ_MAX_DUTY_CYCLE);
-        ADF4382A_SetFinePhaseShift(manager, 0, duty_cycle); // 0 = TX device
+        ADF4382A_SetFinePhaseShift(manager, 0,
+                                   tx_phase_ps != 0 ? DELADJ_MAX_DUTY_CYCLE : 0);
         manager->tx_phase_shift_ps = tx_phase_ps;
     }
 
     if (rx_phase_ps != manager->rx_phase_shift_ps) {
-        uint16_t duty_cycle = phase_ps_to_duty_cycle(rx_phase_ps);
-        DIAG("LO", "RX phase: %d ps -> duty_cycle=%d/%d (TIM3 CH3 PWM)",
-                  rx_phase_ps, duty_cycle, DELADJ_MAX_DUTY_CYCLE);
-        ADF4382A_SetFinePhaseShift(manager, 1, duty_cycle); // 1 = RX device
+        ADF4382A_SetFinePhaseShift(manager, 1,
+                                   rx_phase_ps != 0 ? DELADJ_MAX_DUTY_CYCLE : 0);
         manager->rx_phase_shift_ps = rx_phase_ps;
     }
 
-    printf("Phase shift set: TX=%d ps, RX=%d ps\n", tx_phase_ps, rx_phase_ps);
     return ADF4382A_MANAGER_OK;
 }
 
@@ -515,31 +539,18 @@ int ADF4382A_SetFinePhaseShift(ADF4382A_Manager *manager, uint8_t device, uint16
         return ADF4382A_MANAGER_ERROR_NOT_INIT;
     }
 
-    // Clamp duty cycle
     duty_cycle = (duty_cycle > DELADJ_MAX_DUTY_CYCLE) ? DELADJ_MAX_DUTY_CYCLE : duty_cycle;
 
-    if (duty_cycle == 0) {
-        // Fully OFF: stop PWM, drive pin LOW
-        stop_deladj_pwm(device);
-        set_deladj_pin(device, false);
-        DIAG("LO", "Dev%d DELADJ=LOW (duty=0, PWM stopped)", device);
-    } else if (duty_cycle >= DELADJ_MAX_DUTY_CYCLE) {
-        // Fully ON: stop PWM, drive pin HIGH
-        stop_deladj_pwm(device);
-        set_deladj_pin(device, true);
-        DIAG("LO", "Dev%d DELADJ=HIGH (duty=max, PWM stopped)", device);
-    } else {
-        // Intermediate: use TIM3 PWM output
-        // The PWM output is low-pass filtered externally to produce a DC
-        // voltage proportional to the duty cycle for the ADF4382 DELADJ input.
-        start_deladj_pwm(device, duty_cycle);
-        DIAG("LO", "Dev%d DELADJ PWM started: duty=%d/%d (%.1f%%)",
-             device, duty_cycle, DELADJ_MAX_DUTY_CYCLE,
-             (float)duty_cycle * 100.0f / DELADJ_MAX_DUTY_CYCLE);
-    }
+    /* Hardware-binary DELADJ (see header comment at top of file).
+     *   duty == 0           -> DELADJ LOW
+     *   duty != 0 (any)     -> DELADJ HIGH
+     */
+    bool deladj_high = (duty_cycle != 0);
+    set_deladj_pin(device, deladj_high);
 
-    printf("Device %d DELADJ duty cycle set to %d/%d\n",
-           device, duty_cycle, DELADJ_MAX_DUTY_CYCLE);
+    DIAG("LO", "Dev%d DELADJ=%s (binary; requested duty=%d/%d)",
+         device, deladj_high ? "HIGH" : "LOW",
+         duty_cycle, DELADJ_MAX_DUTY_CYCLE);
 
     return ADF4382A_MANAGER_OK;
 }
@@ -588,25 +599,3 @@ static void set_delstr_pin(uint8_t device, bool state)
     }
 }
 
-static void start_deladj_pwm(uint8_t device, uint16_t duty_cycle)
-{
-    // TX DELADJ → TIM3_CH2, RX DELADJ → TIM3_CH3
-    // Timer period (ARR) is configured to DELADJ_MAX_DUTY_CYCLE in CubeMX.
-    uint32_t channel = (device == 0) ? TIM_CHANNEL_2 : TIM_CHANNEL_3;
-    __HAL_TIM_SET_COMPARE(&htim3, channel, (uint32_t)duty_cycle);
-    HAL_TIM_PWM_Start(&htim3, channel);
-}
-
-static void stop_deladj_pwm(uint8_t device)
-{
-    uint32_t channel = (device == 0) ? TIM_CHANNEL_2 : TIM_CHANNEL_3;
-    HAL_TIM_PWM_Stop(&htim3, channel);
-}
-
-static uint16_t phase_ps_to_duty_cycle(uint16_t phase_ps)
-{
-    // Convert phase shift in picoseconds to DELADJ duty cycle
-    // This is a linear mapping - adjust based on your specific requirements
-    uint32_t duty = (uint32_t)phase_ps * DELADJ_MAX_DUTY_CYCLE / PHASE_SHIFT_MAX_PS;
-    return (uint16_t)duty;
-}
