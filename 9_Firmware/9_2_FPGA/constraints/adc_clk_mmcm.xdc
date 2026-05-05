@@ -26,24 +26,28 @@
 # --------------------------------------------------------------------------
 # CDC: BUFIO domain (adc_dco_p) ↔ MMCM output domain (clk_mmcm_out0)
 # --------------------------------------------------------------------------
-# The IDDR outputs are captured by BUFIO (adc_dco_p clock), then re-registered
-# into the MMCM BUFG domain in ad9484_interface_400m.v.
+# Post-AUDIT-C4 (2026-05-01) the AD9484 capture is SDR: a single
+# (* IOB="TRUE" *) IFF on the falling BUFIO edge — no IDDR, no rise/fall
+# demux. The IFF output (adc_data_iff) re-registers into the MMCM BUFG
+# domain (adc_data_iff_bufg) in ad9484_interface_400m.v.
 # These clocks are frequency-matched and phase-related (MMCM is locked to
 # adc_dco_p), so the single register transfer is safe. We use max_delay
 # to ensure the tools verify the transfer fits within the valid data window
 # without over-constraining with full inter-clock setup/hold analysis.
 #
 # 3.000 ns = 1.2× the 2.500 ns clock period. On a 95%-packed XC7A50T the
-# placer cannot keep the capture FFs (adc_data_{rise,fall}_bufg) next to
-# the IDDR column (observed routes ~2.28 ns IDDR → SLICE_X0Y123); the old
-# 2.700 ns window failed by ~120 ps. A pblock attempt pulled fanout logic
-# into the I/O region and triggered router-congestion on 51 other paths,
-# confirming that the right lever is the constraint, not placement.
-# 3.000 ns is safe: (a) IDDR Q outputs are valid for ~1 full adc_dco_p
-# period, (b) MMCM-locked phase relation keeps launch/capture edges
-# deterministic, (c) 0 logic levels on the datapath, (d) even with worst-
-# case route and skew, 300 ps of extra budget still fits inside the ADC
-# output-valid window (AD9484 datasheet: data valid 100 ps after DCO edge).
+# placer cannot keep the BUFG-domain capture FF (adc_data_iff_bufg) next
+# to the IOB column where the IFF lives (observed routes ~2.28 ns IFF →
+# SLICE_X0Y123); the old 2.700 ns window failed by ~120 ps. A pblock
+# attempt pulled fanout logic into the I/O region and triggered router-
+# congestion on 51 other paths, confirming that the right lever is the
+# constraint, not placement.
+# 3.000 ns is safe: (a) the IFF Q output is valid for the full adc_dco_p
+# period (one new sample per DCO; SDR-stable until the next falling edge),
+# (b) MMCM-locked phase relation keeps launch/capture edges deterministic,
+# (c) 0 logic levels on the datapath, (d) even with worst-case route and
+# skew, 300 ps of extra budget still fits inside the ADC output-valid
+# window (AD9484 datasheet: data valid 100 ps after DCO edge).
 set_max_delay -datapath_only -from [get_clocks adc_dco_p] \
     -to [get_clocks clk_mmcm_out0] 3.000
 
@@ -54,7 +58,7 @@ set_max_delay -datapath_only -from [get_clocks clk_mmcm_out0] \
 # CDC: MMCM output domain ↔ other clock domains
 # --------------------------------------------------------------------------
 # The existing false paths in the production XDC reference adc_dco_p, which
-# now only covers the BUFIO/IDDR domain. The MMCM output clock (which drives
+# now only covers the BUFIO/IFF domain. The MMCM output clock (which drives
 # all fabric 400 MHz logic) needs its own false path declarations.
 set_false_path -from [get_clocks clk_100m] -to [get_clocks clk_mmcm_out0]
 set_false_path -from [get_clocks clk_mmcm_out0] -to [get_clocks clk_100m]
@@ -81,7 +85,7 @@ set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks clk_mmcm_out0]
 set_false_path -through [get_pins -hierarchical -filter {REF_PIN_NAME == LOCKED}]
 
 # --------------------------------------------------------------------------
-# Hold waiver for source-synchronous ADC capture (BUFIO-clocked IDDR)
+# Hold waiver for source-synchronous ADC capture (BUFIO-clocked IFF, SDR)
 # --------------------------------------------------------------------------
 # The AD9484 ADC provides a source-synchronous interface: data (adc_d_p/n)
 # and clock (adc_dco_p/n) are output from the same chip with matched timing.
@@ -89,17 +93,18 @@ set_false_path -through [get_pins -hierarchical -filter {REF_PIN_NAME == LOCKED}
 #
 # Inside the FPGA, the DCO clock path goes through IBUFDS → BUFIO, adding
 # ~2.2ns of insertion delay (IBUFDS 0.9ns + routing 0.6ns + BUFIO 1.3ns).
-# The data path goes through IBUFDS only (~0.85ns), arriving at the IDDR
-# ~1.4ns before the clock. Vivado's hold analysis sees the data "changing"
-# before the clock edge and reports WHS = -1.955ns.
+# The data path goes through IBUFDS only (~0.85ns), arriving at the IOB-
+# packed IFF ~1.4ns before the clock. Vivado's hold analysis sees the data
+# "changing" before the clock edge and reports WHS = -1.955ns.
 #
 # This is correct internal behavior: the BUFIO clock intentionally arrives
-# after the data. The IDDR captures on the BUFIO edge, by which time the
-# data is stable. Hold timing is guaranteed by the external PCB layout
-# (ADC data valid window centered on DCO edge), not by FPGA clock tree
-# delays. Vivado's STA model cannot account for this external relationship.
+# after the data. The IFF captures on the falling BUFIO edge (1.25 ns
+# inside the AD9484 stable window), by which time the data is stable.
+# Hold timing is guaranteed by the external PCB layout (ADC data valid
+# window centered on DCO edge), not by FPGA clock tree delays. Vivado's
+# STA model cannot account for this external relationship.
 #
-# Waiving hold on these 8 paths (adc_d_p[0..7] → IDDR) is standard practice
+# Waiving hold on these 8 paths (adc_d_p[0..7] → IFF) is standard practice
 # for source-synchronous LVDS ADC interfaces using BUFIO capture.
 # adc_or_p (AD9484 overrange, audit F-0.1) shares the same IBUFDS→BUFIO
 # source-synchronous capture topology as adc_d_p[*] — same ~1.9 ns STA hold
