@@ -1843,6 +1843,131 @@ class TestReplayOpcodeDispatch(unittest.TestCase):
 
 
 # =============================================================================
+# Test: live vs replay physical-unit parity — regression guard for unit drift
+#
+# Origin: f895c02 (Serhii <jshmitz@me.com>) — adapted for the post-PR-Q.6
+# code structure where both worker paths delegate to
+# extract_targets_from_frame_crt instead of doing in-method bin->units math.
+#
+# Uses AST parse of workers.py (not inspect.getsource / import) so the test
+# runs in headless CI without PyQt6 — v7.workers imports PyQt6 unconditionally,
+# and contract enforcement must not be gated on GUI deps.
+#
+# Asserts on AST nodes (Call / Attribute), not source substrings, so false-pass
+# on comments or docstring wording is impossible.
+# =============================================================================
+
+
+class TestLiveReplayPhysicalUnitsParity(unittest.TestCase):
+    """Live (RadarDataWorker._run_host_dsp) and replay (ReplayWorker._emit_frame)
+    must both delegate detection->target conversion to
+    extract_targets_from_frame_crt with self._waveform as the units source.
+
+    Regression context: before PR-Q.6, RadarDataWorker computed velocity from
+    self._settings.velocity_resolution (RadarSettings default 1.0 m/s/bin)
+    while ReplayWorker used WaveformConfig (~5.343 m/s/bin) — live GUI
+    under-reported velocity by ~5.34x. PR-Q.6 unified both paths through
+    extract_targets_from_frame_crt(frame, self._waveform, ...). This test
+    fails if either path drifts back to per-method bin->units math or to
+    self._settings-based resolution.
+    """
+
+    @staticmethod
+    def _parse_method(class_name: str, method_name: str):
+        """Return AST FunctionDef for class_name.method_name from workers.py
+        without importing v7.workers (PyQt6-independent)."""
+        import ast
+        from pathlib import Path
+        path = Path(__file__).parent / "v7" / "workers.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef) and item.name == method_name:
+                        return item
+        raise RuntimeError(f"{class_name}.{method_name} not found in workers.py")
+
+    @staticmethod
+    def _calls_extract_with_self_waveform(tree):
+        """True if tree contains a call to extract_targets_from_frame_crt
+        (or self._extract_targets, which ReplayWorker.__init__ binds to it)
+        passing self._waveform as a positional or keyword argument."""
+        import ast
+        target_names = {"extract_targets_from_frame_crt", "_extract_targets"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else (
+                f.attr if isinstance(f, ast.Attribute) else None
+            )
+            if name not in target_names:
+                continue
+            args_iter = list(node.args) + [kw.value for kw in node.keywords]
+            for arg in args_iter:
+                if (isinstance(arg, ast.Attribute)
+                        and arg.attr == "_waveform"
+                        and isinstance(arg.value, ast.Name)
+                        and arg.value.id == "self"):
+                    return True
+        return False
+
+    @staticmethod
+    def _reads_settings_resolution(tree):
+        """True if tree reads self._settings.velocity_resolution or
+        self._settings.range_resolution — the regression pattern."""
+        import ast
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute)
+                    and node.attr in ("velocity_resolution", "range_resolution")):
+                continue
+            if (isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "_settings"
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "self"):
+                return True
+        return False
+
+    def test_live_path_uses_self_waveform_for_extraction(self):
+        method = self._parse_method("RadarDataWorker", "_run_host_dsp")
+        self.assertTrue(
+            self._calls_extract_with_self_waveform(method),
+            "RadarDataWorker._run_host_dsp must call "
+            "extract_targets_from_frame_crt(..., self._waveform, ...) — "
+            "see f895c02 / PR-Q.6 for context.",
+        )
+
+    def test_live_path_does_not_read_settings_resolution(self):
+        method = self._parse_method("RadarDataWorker", "_run_host_dsp")
+        self.assertFalse(
+            self._reads_settings_resolution(method),
+            "RadarDataWorker._run_host_dsp must NOT read "
+            "self._settings.{velocity,range}_resolution — those default to 1.0 "
+            "(RadarSettings) and produce ~5.34x velocity under-reporting vs "
+            "replay. Use self._waveform via extract_targets_from_frame_crt.",
+        )
+
+    def test_replay_path_uses_self_waveform_for_extraction(self):
+        method = self._parse_method("ReplayWorker", "_emit_frame")
+        self.assertTrue(
+            self._calls_extract_with_self_waveform(method),
+            "ReplayWorker._emit_frame must call "
+            "self._extract_targets(..., self._waveform, ...) "
+            "(where _extract_targets = extract_targets_from_frame_crt at "
+            "__init__) — see f895c02 / PR-Q.6 for context.",
+        )
+
+    def test_replay_path_does_not_read_settings_resolution(self):
+        method = self._parse_method("ReplayWorker", "_emit_frame")
+        self.assertFalse(
+            self._reads_settings_resolution(method),
+            "ReplayWorker._emit_frame must NOT read "
+            "self._settings.{velocity,range}_resolution — use self._waveform "
+            "via extract_targets_from_frame_crt.",
+        )
+
+
+# =============================================================================
 # Helper: lazy import of v7.models
 # =============================================================================
 
