@@ -320,13 +320,26 @@ ad9484_interface_400m adc (
 	.mmcm_locked()
 );
 
-// Audit F-0.1: stickify the 400 MHz OR pulse, then CDC to clk_100m via 2FF.
-// Same reasoning as ddc_cic_fir_overrun: single-bit, low→high-only once
-// latched, so a 2FF sync is sufficient for a GPIO-class diagnostic. Cleared
-// only by global reset_n.
-reg adc_overrange_sticky_400m;
+// Audit F-0.1 / F-7.7: stickify the 400 MHz OR pulse, then CDC to clk_100m
+// via 2FF. Single-bit, low→high-only once latched, so a 2FF sync is
+// sufficient for a GPIO-class diagnostic.
+//
+// F-7.7 fix: clear path now follows the same `clear_monitors_pulse` wire
+// as the DDC's `reset_monitors` port (see ddc instance below). Today
+// clear_monitors_pulse is tied 1'b0, matching the prior reset_n-only
+// behaviour; once a host opcode for "clear diagnostic stickies" lands,
+// both this OR sticky and the DDC's overrun/saturation flags clear from
+// the same edge — no per-flag re-plumbing needed.
+//
+// Compare with ddc_400m.v `cdc_cic_fir_overrun_sticky` which already
+// uses reset_monitors as a clear, and the new symmetric path here keeps
+// the AD9484 overrange diagnostic consistent.
+wire clear_monitors_pulse = 1'b0;   // future host-driven clear hook
+reg  adc_overrange_sticky_400m;
 always @(posedge clk_400m or negedge reset_n) begin
     if (!reset_n)
+        adc_overrange_sticky_400m <= 1'b0;
+    else if (clear_monitors_pulse)
         adc_overrange_sticky_400m <= 1'b0;
     else if (adc_overrange_400m)
         adc_overrange_sticky_400m <= 1'b1;
@@ -391,7 +404,10 @@ ddc_400m_enhanced ddc(
     .test_mode(2'b00),
     .test_phase_inc(16'h0000),
     .force_saturation(1'b0),
-    .reset_monitors(1'b0),
+    // F-7.7: routed through the shared clear_monitors_pulse wire so the
+    // DDC's internal stickies and the AD9484 OR sticky above clear from
+    // the same future host opcode.
+    .reset_monitors(clear_monitors_pulse),
     .debug_sample_count(),
     .debug_internal_i(),
     .debug_internal_q(),
