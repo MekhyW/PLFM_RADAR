@@ -59,13 +59,20 @@ static void run_buggy(void)
     (void)m; (void)n; (void)y;
 }
 
-/* Post-fix: same body, no local redeclaration — references globals. */
+/* Post-fix: same body, no local redeclaration — references globals.
+ * PR-AB.a moved vector_0 out of the inner loop, so the m advance is now
+ *   1 (vector_0, before loop) + 2 × 15 (matrix1+matrix2 in loop) = 31 increments
+ * per azimuth, instead of the prior 3 × 15 = 45. The wrap behavior
+ * (g_m wraps on every iteration's matrix2 add) is unchanged. */
 static void run_fixed(void)
 {
+    /* PR-AB.a: vector_0 broadside reference, 1× per azimuth (was inside loop). */
+    g_m += m_max / 2;
+    if (g_m > m_max) g_m = 1;
+
     for (int beam_pos = 0; beam_pos < 15; beam_pos++) {
-        g_m += m_max / 2;
-        g_m += m_max / 2;
-        g_m += m_max / 2;
+        g_m += m_max / 2;  /* matrix1 (negative-θ scan) */
+        g_m += m_max / 2;  /* matrix2 (positive-θ scan) */
         if (g_m > m_max) g_m = 1;
 
         g_n++;

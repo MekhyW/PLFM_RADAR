@@ -567,12 +567,15 @@ void runRadarPulseSequence() {
     // BeamPos/Azimuth/ChirpCount. Local declarations would shadow them and
     // freeze the telemetry at 1.
 
-    /* Main beam steering sequence. Per beam position we push three ADAR1000
-     * pattern updates: matrix1, vector_0 (broadside), matrix2 (see
-     * initializeBeamMatrices for the actual sim-peak directions and the
-     * sign-convention caveat). The FPGA's chirp_scheduler is firing the
-     * 3-PRI ladder against whichever pattern is currently loaded; we hold
-     * each pattern for one full SHORT/MEDIUM/LONG ladder before advancing.
+    /* Main beam steering sequence. Per azimuth slot we fire one broadside
+     * reference (vector_0) and then sweep 15 beam positions, each firing
+     * matrix1 (negative-θ scan) and matrix2 (positive-θ scan). PR-AB.a
+     * pulled vector_0 out of the inner loop — previously fired 15× per
+     * azimuth (between every matrix1/matrix2 pair) which dominated the
+     * 18.4 s revisit time without serving a documented per-pos purpose.
+     * One broadside frame per azimuth is sufficient as a clutter
+     * reference; if multiple per-pos broadside frames are ever needed
+     * they should re-enter behind a runtime switch.
      *
      * Per-pattern dwell:
      *   16 × PRI_SHORT  (175 us) +
@@ -581,26 +584,30 @@ void runRadarPulseSequence() {
      * HAL_Delay yields to SysTick / IRQs, so unlike the removed
      * executeChirpSequence busy-loop the MCU stays responsive to USB CDC,
      * UART, and I2C peripherals during the dwell. For drift-immune sync
-     * we'd wait on an FPGA `subframe_pulse` GPIO instead, but the bitstream
-     * does not currently bring that signal out to a pin. */
+     * we'd wait on an FPGA `subframe_pulse` GPIO instead — DIG_7
+     * (H12→PD15) is wired in the schematic but currently driven by the
+     * F-6.4 watchdog OR; reassigning it is a tracked follow-up
+     * (PR-AB.b). */
     static const uint32_t BEAM_PATTERN_DWELL_MS = 8u;
+
+    // One broadside (vector_0) reference frame per azimuth — replaces the
+    // 15 in-loop fires that PR-AB.a removed.
+    DIAG("SYS", "Broadside reference (vector_0) — 1× per azimuth");
+    adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::TX);
+    adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::RX);
+    HAL_Delay(BEAM_PATTERN_DWELL_MS);
+    m += m_max/2;
 
     for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
     	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_9);// new_elevation -- mode 2'b00 input only; no-op in production mode 2'b01 but harmless to keep
-    	DIAG("SYS", "Beam pos %d/15: patterns matrix1/vector_0/matrix2", beam_pos);
-        // Pattern 1: matrix1
+    	DIAG("SYS", "Beam pos %d/15: patterns matrix1/matrix2", beam_pos);
+        // Pattern 1: matrix1 (negative-θ scan, peak at -62°..-3°)
         adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::TX);
         adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::RX);
         HAL_Delay(BEAM_PATTERN_DWELL_MS);
         m += m_max/2;
 
-        // Pattern 2: vector_0 (broadside)
-        adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::TX);
-        adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::RX);
-        HAL_Delay(BEAM_PATTERN_DWELL_MS);
-        m += m_max/2;
-
-        // Pattern 3: matrix2
+        // Pattern 2: matrix2 (positive-θ scan, peak at +3°..+62°)
         adarManager.setCustomBeamPattern16(matrix2[beam_pos], ADAR1000Manager::BeamDirection::TX);
         adarManager.setCustomBeamPattern16(matrix2[beam_pos], ADAR1000Manager::BeamDirection::RX);
         HAL_Delay(BEAM_PATTERN_DWELL_MS);
