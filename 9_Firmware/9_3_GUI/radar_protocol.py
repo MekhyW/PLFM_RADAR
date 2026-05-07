@@ -35,9 +35,12 @@ USB transports + wire formats (these intentionally diverge):
           [0xAA][range_q 2B][range_i 2B][dop_re 2B][dop_im 2B][det 1B][0x55]
           where det byte = {frame_start, 6'b0, cfar_detection}.
 
-  Status (both transports, PR-G v2)
-      [0xBB][7 x 32-bit status_words][0x55] = 30 B. status_words[6] carries
-      2-tier-CFAR telemetry: {detect_count_cand[31:16], detect_threshold_soft[15:0]}.
+  Status (FT2232H production, M-5)
+      [0xBB][8 x 32-bit status_words][0x55] = 34 B. status_words[6] carries
+      2-tier-CFAR telemetry (PR-G); status_words[7] carries
+      {medium_chirp[31:16], medium_listen[15:0]} (M-5). Legacy FT601 path
+      still emits the pre-PR-G 26-byte 6-word layout (no host code reads it
+      today; the production transport is FT2232H).
 
   RX (Host → FPGA, both transports)
       4 bytes per command: {opcode[7:0], addr[7:0], value[15:8], value[7:0]}.
@@ -71,7 +74,7 @@ STATUS_HEADER_BYTE = 0xBB
 
 # Packet sizes
 DATA_PACKET_SIZE = 11               # 1 + 4 + 2 + 2 + 1 + 1 (FT601 legacy)
-STATUS_PACKET_SIZE = 30              # 1 + 28 + 1 (PR-G v2: 7 status_words)
+STATUS_PACKET_SIZE = 34              # 1 + 32 + 1 (M-5: 8 status_words; was 30 / PR-G 7 words)
 
 NUM_RANGE_BINS = 512
 NUM_DOPPLER_BINS = 48                 # PR-F/PR-Q: 3 sub-frames * 16 (= FPGA RP_NUM_DOPPLER_BINS)
@@ -239,7 +242,7 @@ class RadarFrame:
 
 @dataclass
 class StatusResponse:
-    """Parsed status response from FPGA (PR-G v2: 7-word / 30-byte packet)."""
+    """Parsed status response from FPGA (M-5: 8-word / 34-byte packet)."""
     radar_mode: int = 0
     stream_ctrl: int = 0
     cfar_threshold: int = 0
@@ -265,6 +268,9 @@ class StatusResponse:
     detect_threshold_soft: int = 0  # 16-bit soft-CFAR threshold readback (saturates 0xFFFF)
     # AUDIT-S10 control-fault flags (word 5 high half)
     frame_drop_count: int = 0    # frame-drop counter from RTL
+    # M-5 MEDIUM PRI readback (word 7) — closes 161-µs MEDIUM visibility gap.
+    medium_chirp: int = 0        # opcode 0x17 readback (16-bit, default RP_DEF_MEDIUM_CHIRP_CYCLES)
+    medium_listen: int = 0       # opcode 0x18 readback (16-bit, default RP_DEF_MEDIUM_LISTEN_CYCLES)
 
 
 # ============================================================================
@@ -337,9 +343,11 @@ class RadarProtocol:
         """
         Parse a status response packet.
 
-        PR-G v2 format: [0xBB] [7 x 4B status_words] [0x55] = 1 + 28 + 1 = 30 bytes.
-        Audit P-3: pre-PR-G GUI used 26 (six words); FPGA `STATUS_PKT_LEN=30` since
-        PR-G added word[6] for 2-tier-CFAR telemetry.
+        M-5 format: [0xBB] [8 x 4B status_words] [0x55] = 1 + 32 + 1 = 34 bytes.
+        History: pre-PR-G was 26 B (6 words); PR-G bumped to 30 B (7 words) for
+        2-tier-CFAR telemetry; M-5 bumped to 34 B (8 words) for medium_chirp /
+        medium_listen readback (PR-G ran out of reserved bits in word 3 to fit
+        a second 16-bit pair).
         """
         if len(raw) < STATUS_PACKET_SIZE:
             return None
@@ -347,7 +355,7 @@ class RadarProtocol:
             return None
 
         words = []
-        for i in range(7):
+        for i in range(8):
             w = struct.unpack_from(">I", raw, 1 + i * 4)[0]
             words.append(w)
 
@@ -386,6 +394,9 @@ class RadarProtocol:
         # (saturated to 0xFFFF when the 17-bit RTL value exceeds 16-bit range).
         sr.detect_threshold_soft = words[6] & 0xFFFF
         sr.detect_count_cand = (words[6] >> 16) & 0xFFFF
+        # Word 7 (M-5 MEDIUM PRI readback): {medium_chirp[31:16], medium_listen[15:0]}
+        sr.medium_listen = words[7] & 0xFFFF
+        sr.medium_chirp = (words[7] >> 16) & 0xFFFF
         return sr
 
     @staticmethod
@@ -565,10 +576,11 @@ class RadarProtocol:
     def find_bulk_frame_boundaries(buf: bytes) -> list[tuple[int, int, str]]:
         """Scan a byte stream for FT2232H bulk frames and status packets.
 
-        Status packets (0xBB header, 26 B) are unchanged between transports
-        — the WR_STATUS_SEND state in usb_data_interface_ft2232h.v emits the
-        same layout as the legacy FT601 path. Bulk data frames (0xAA header)
-        are variable length per `_bulk_frame_size_from_flags`.
+        Status packets (0xBB header, 34 B post M-5) come from
+        WR_STATUS_SEND in usb_data_interface_ft2232h.v. (Legacy FT601 path
+        emits a different 26-byte status layout but is not used by current
+        host code.) Bulk data frames (0xAA header) are variable length per
+        `_bulk_frame_size_from_flags`.
 
         Returns a list of (start, end, ptype) tuples like
         find_packet_boundaries, where ptype is "data" or "status". On a

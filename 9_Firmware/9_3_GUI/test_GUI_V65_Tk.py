@@ -133,8 +133,9 @@ class TestRadarProtocol(unittest.TestCase):
                             st_flags=0, st_detail=0, st_busy=0,
                             agc_gain=0, agc_peak=0, agc_sat=0, agc_enable=0,
                             chirps_mismatch=0,
-                            cand_count=0, thr_soft=0, frame_drop=0):
-        """Build a PR-G v2 30-byte status response matching FPGA format."""
+                            cand_count=0, thr_soft=0, frame_drop=0,
+                            medium_chirp=0, medium_listen=0):
+        """Build an M-5 34-byte status response matching FPGA format."""
         pkt = bytearray()
         pkt.append(STATUS_HEADER_BYTE)
 
@@ -174,6 +175,10 @@ class TestRadarProtocol(unittest.TestCase):
         w6 = ((cand_count & 0xFFFF) << 16) | (thr_soft & 0xFFFF)
         pkt += struct.pack(">I", w6)
 
+        # Word 7 (M-5 MEDIUM PRI readback): {medium_chirp[31:16], medium_listen[15:0]}
+        w7 = ((medium_chirp & 0xFFFF) << 16) | (medium_listen & 0xFFFF)
+        pkt += struct.pack(">I", w7)
+
         pkt.append(FOOTER_BYTE)
         return bytes(pkt)
 
@@ -207,8 +212,9 @@ class TestRadarProtocol(unittest.TestCase):
         self.assertEqual(sr.range_mode, 2)
 
     def test_parse_status_too_short(self):
-        # Anything under STATUS_PACKET_SIZE (30) must be rejected.
-        self.assertIsNone(RadarProtocol.parse_status_packet(b"\xBB" + b"\x00" * 28))
+        # Anything under STATUS_PACKET_SIZE (34 post-M-5) must be rejected.
+        # 33-byte input = header + 32 bytes (one short of valid).
+        self.assertIsNone(RadarProtocol.parse_status_packet(b"\xBB" + b"\x00" * 32))
 
     def test_parse_status_wrong_header(self):
         raw = self._make_status_packet()
@@ -227,6 +233,34 @@ class TestRadarProtocol(unittest.TestCase):
         self.assertIsNotNone(sr)
         self.assertEqual(sr.detect_count_cand, 0x0A5C)
         self.assertEqual(sr.detect_threshold_soft, 0x1234)
+
+    def test_parse_status_word7_medium_pri_readback(self):
+        """M-5: word[7] high-half = medium_chirp, low-half = medium_listen.
+
+        Closes the 161-µs MEDIUM PRI visibility gap left by PR-G (status word 3
+        had only 10 reserved bits, not enough for a second 16-bit pair). Default
+        production values: 500 cycles MEDIUM_CHIRP / 15600 cycles MEDIUM_LISTEN
+        per RP_DEF_MEDIUM_*_CYCLES — picked here as the round-trip canary.
+        """
+        raw = self._make_status_packet(medium_chirp=500, medium_listen=15600)
+        sr = RadarProtocol.parse_status_packet(raw)
+        self.assertIsNotNone(sr)
+        self.assertEqual(sr.medium_chirp, 500)
+        self.assertEqual(sr.medium_listen, 15600)
+        # Defaults for unrelated fields must still be zero — guards against
+        # bit-stealing into word 7 from neighbours.
+        self.assertEqual(sr.detect_count_cand, 0)
+        self.assertEqual(sr.detect_threshold_soft, 0)
+        # Packet length matches new STATUS_PACKET_SIZE.
+        self.assertEqual(len(raw), STATUS_PACKET_SIZE)
+        self.assertEqual(STATUS_PACKET_SIZE, 34)
+
+    def test_parse_status_word7_max_values(self):
+        """M-5: 16-bit max in both halves of word 7 round-trips clean (no overflow)."""
+        raw = self._make_status_packet(medium_chirp=0xFFFF, medium_listen=0xFFFF)
+        sr = RadarProtocol.parse_status_packet(raw)
+        self.assertEqual(sr.medium_chirp, 0xFFFF)
+        self.assertEqual(sr.medium_listen, 0xFFFF)
 
     def test_parse_status_word4_layout_co_spec(self):
         """GUI-S3: pin status word 4 bit positions to the FPGA word builder.
@@ -326,11 +360,11 @@ class TestRadarProtocol(unittest.TestCase):
         self.assertEqual(sr.self_test_detail, 0)
         self.assertEqual(sr.self_test_busy, 0)
 
-    def test_status_packet_is_30_bytes(self):
-        """PR-G v2: status packet is 30 bytes (1 + 7*4 + 1)."""
+    def test_status_packet_is_34_bytes(self):
+        """M-5: status packet is 34 bytes (1 + 8*4 + 1; was 30 / PR-G 7 words)."""
         raw = self._make_status_packet()
         self.assertEqual(len(raw), STATUS_PACKET_SIZE)
-        self.assertEqual(len(raw), 30)
+        self.assertEqual(len(raw), 34)
 
     # ----------------------------------------------------------------
     # Boundary detection

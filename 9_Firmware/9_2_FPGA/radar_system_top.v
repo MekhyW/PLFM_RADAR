@@ -1002,6 +1002,9 @@ end else begin : gen_ft2232h
         .status_guard(host_guard_cycles),
         .status_short_chirp(host_short_chirp_cycles),
         .status_short_listen(host_short_listen_cycles),
+        // M-5: MEDIUM PRI readback in status_words[7]
+        .status_medium_chirp(host_medium_chirp_cycles),
+        .status_medium_listen(host_medium_listen_cycles),
         .status_chirps_per_elev(host_chirps_per_elev),
         .status_range_mode(host_range_mode),
         .status_chirps_mismatch(chirps_mismatch_error),

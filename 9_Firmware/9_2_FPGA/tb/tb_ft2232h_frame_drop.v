@@ -137,6 +137,10 @@ module tb_ft2232h_frame_drop;
         .status_guard(status_guard),
         .status_short_chirp(status_short_chirp),
         .status_short_listen(status_short_listen),
+        // M-5: medium PRI readback (test only exercises frame_drop path,
+        // medium values left at defaults since this TB doesn't read status).
+        .status_medium_chirp(16'd0),
+        .status_medium_listen(16'd0),
         .status_chirps_per_elev(status_chirps_per_elev),
         .status_range_mode(status_range_mode),
         .status_chirps_mismatch(status_chirps_mismatch),

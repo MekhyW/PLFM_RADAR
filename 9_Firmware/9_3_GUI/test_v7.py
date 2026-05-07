@@ -549,33 +549,44 @@ class TestSubframeEnableRoundTrip(TestBulkFrameV2RoundTrip):
 
 
 class TestStatusPacketV2RoundTrip(unittest.TestCase):
-    """PR-G v2 status packet: 7 status_words / 30 bytes."""
+    """M-5 status packet: 8 status_words / 34 bytes."""
 
     def _build_status(self, words: list[int]) -> bytes:
         from radar_protocol import STATUS_HEADER_BYTE, FOOTER_BYTE
-        assert len(words) == 7
+        assert len(words) == 8
         body = b"".join(struct.pack(">I", w & 0xFFFFFFFF) for w in words)
         return bytes([STATUS_HEADER_BYTE]) + body + bytes([FOOTER_BYTE])
 
-    def test_size_is_30(self):
+    def test_size_is_34(self):
         from radar_protocol import STATUS_PACKET_SIZE
-        self.assertEqual(STATUS_PACKET_SIZE, 30)
-        pkt = self._build_status([0] * 7)
-        self.assertEqual(len(pkt), 30)
+        self.assertEqual(STATUS_PACKET_SIZE, 34)
+        pkt = self._build_status([0] * 8)
+        self.assertEqual(len(pkt), 34)
 
     def test_word6_telemetry_decoded(self):
         """word[6] = {detect_count_cand[31:16], detect_threshold_soft[15:0]}"""
         from radar_protocol import RadarProtocol
         word6 = (0x1234 << 16) | 0xABCD  # cand=0x1234, thr_soft=0xABCD
-        pkt = self._build_status([0, 0, 0, 0, 0, 0, word6])
+        pkt = self._build_status([0, 0, 0, 0, 0, 0, word6, 0])
         sr = RadarProtocol.parse_status_packet(pkt)
         self.assertIsNotNone(sr)
         self.assertEqual(sr.detect_count_cand, 0x1234)
         self.assertEqual(sr.detect_threshold_soft, 0xABCD)
 
+    def test_word7_medium_pri_decoded(self):
+        """M-5: word[7] = {medium_chirp[31:16], medium_listen[15:0]}"""
+        from radar_protocol import RadarProtocol
+        # Production defaults: 500 chirp / 15600 listen (RP_DEF_MEDIUM_*).
+        word7 = (500 << 16) | 15600
+        pkt = self._build_status([0, 0, 0, 0, 0, 0, 0, word7])
+        sr = RadarProtocol.parse_status_packet(pkt)
+        self.assertIsNotNone(sr)
+        self.assertEqual(sr.medium_chirp, 500)
+        self.assertEqual(sr.medium_listen, 15600)
+
     def test_short_packet_returns_none(self):
         from radar_protocol import RadarProtocol
-        pkt = self._build_status([0] * 7)
+        pkt = self._build_status([0] * 8)
         self.assertIsNone(RadarProtocol.parse_status_packet(pkt[:25]))
 
     def test_pre_PR_G_26byte_packet_rejected(self):
@@ -585,6 +596,14 @@ class TestStatusPacketV2RoundTrip(unittest.TestCase):
         old_pkt = (bytes([STATUS_HEADER_BYTE])
                    + b"\x00" * 24 + bytes([FOOTER_BYTE]))
         self.assertEqual(len(old_pkt), 26)
+        self.assertIsNone(RadarProtocol.parse_status_packet(old_pkt))
+
+    def test_pre_M5_30byte_packet_rejected(self):
+        """Pre-M-5 30-byte (PR-G 7-word) status packets must reject after the bump."""
+        from radar_protocol import RadarProtocol, STATUS_HEADER_BYTE, FOOTER_BYTE
+        old_pkt = (bytes([STATUS_HEADER_BYTE])
+                   + b"\x00" * 28 + bytes([FOOTER_BYTE]))
+        self.assertEqual(len(old_pkt), 30)
         self.assertIsNone(RadarProtocol.parse_status_packet(old_pkt))
 
 

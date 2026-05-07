@@ -9,8 +9,9 @@
 //      reaches the cmd_* outputs of the read FSM with the right byte order.
 //   2. Bulk frame header v2 — verify byte0=0xAA, byte1=0x02 (version),
 //      byte2=stream flags, bytes3-8=frame_num/range/doppler counts.
-//   3. Status packet length — verify 30 bytes (was 26 in v1) and that
-//      status_words[6] carries detect_count_cand/detect_threshold_soft.
+//   3. Status packet length — verify 34 bytes (M-5; was 30 / PR-G; 26 / v1).
+//      status_words[6] carries detect_count_cand/detect_threshold_soft (PR-G).
+//      status_words[7] carries medium_chirp/medium_listen (M-5).
 //   4. PR-G FSM trim — full-frame header/body length consistency. With all
 //      streams enabled, total emitted bytes must equal 9 (hdr) + range×2 +
 //      range×doppler×2 (doppler) + range×doppler×2/8 (detect) + 1 (footer).
@@ -78,6 +79,10 @@ module tb_usb_protocol_v2;
     reg [15:0] status_guard = 16'd0;
     reg [15:0] status_short_chirp = 16'd0;
     reg [15:0] status_short_listen = 16'd0;
+    // M-5: status_words[7] medium PRI readback (test default = production
+    // RP_DEF_MEDIUM_*_CYCLES so the round-trip canary is the real boot value)
+    reg [15:0] status_medium_chirp  = 16'd`RP_DEF_MEDIUM_CHIRP_CYCLES;
+    reg [15:0] status_medium_listen = 16'd`RP_DEF_MEDIUM_LISTEN_CYCLES;
     reg [5:0]  status_chirps_per_elev = 6'd0;
     reg [1:0]  status_range_mode = 2'd0;
     reg        status_chirps_mismatch = 1'b0;
@@ -141,6 +146,9 @@ module tb_usb_protocol_v2;
         .status_guard(status_guard),
         .status_short_chirp(status_short_chirp),
         .status_short_listen(status_short_listen),
+        // M-5: medium PRI readback feeding status_words[7]
+        .status_medium_chirp(status_medium_chirp),
+        .status_medium_listen(status_medium_listen),
         .status_chirps_per_elev(status_chirps_per_elev),
         .status_range_mode(status_range_mode),
         .status_chirps_mismatch(status_chirps_mismatch),
@@ -271,9 +279,11 @@ module tb_usb_protocol_v2;
         check_b("T2.8: byte9 = footer 0x55",  egress_bytes[9] == 8'h55);
 
         // -------------------------------------------------------------
-        // TEST 3: Status packet length = 30 bytes; word[6] carries telemetry
+        // TEST 3: Status packet length = 34 bytes (M-5);
+        //   word[6] carries 2-tier CFAR telemetry (PR-G);
+        //   word[7] carries medium_chirp/medium_listen (M-5).
         // -------------------------------------------------------------
-        $display("\n[TEST 3] Status packet length 30B + word[6] PR-G fields");
+        $display("\n[TEST 3] Status packet length 34B + word[6]/word[7] fields");
         egress_count = 0;
         @(posedge clk);
         status_request = 1'b1;
@@ -281,7 +291,8 @@ module tb_usb_protocol_v2;
         status_request = 1'b0;
         wait_clk(300);  // Wait for status drain
         check_b("T3.1: byte0 = 0xBB (status header)", egress_bytes[0] == 8'hBB);
-        check_b("T3.2: byte29 = 0x55 (footer)",       egress_bytes[29] == 8'h55);
+        // M-5: footer moved 29→33 with the 4-byte word[7] insertion.
+        check_b("T3.2: byte33 = 0x55 (footer)",       egress_bytes[33] == 8'h55);
         check_b("T3.3: status_words[6] count_cand[15:8]=0", egress_bytes[25] == 8'h00);
         check_b("T3.4: status_words[6] count_cand[7:0]=42", egress_bytes[26] == 8'd42);
         check_b("T3.5: status_words[6] thr_soft[15:8]=0x0A", egress_bytes[27] == 8'h0A);
@@ -294,6 +305,12 @@ module tb_usb_protocol_v2;
         //   word[4][7:0] = {alpha_soft[7:0], range_mode[1:0]} = {8'h18, 2'b00} = 8'h60
         check_b("T3.7: status_words[4][7:0] = alpha_soft<<2 = 0x60 (alpha=0x18)",
                 egress_bytes[20] == 8'h60);
+        // M-5: status_words[7] = {medium_chirp, medium_listen}.
+        // Defaults from RP_DEF_*: 500 (0x01F4) chirp / 15600 (0x3CF0) listen.
+        check_b("T3.8: status_words[7] medium_chirp[15:8]=0x01",  egress_bytes[29] == 8'h01);
+        check_b("T3.9: status_words[7] medium_chirp[7:0]=0xF4",   egress_bytes[30] == 8'hF4);
+        check_b("T3.10: status_words[7] medium_listen[15:8]=0x3C", egress_bytes[31] == 8'h3C);
+        check_b("T3.11: status_words[7] medium_listen[7:0]=0xF0",  egress_bytes[32] == 8'hF0);
 
         // -------------------------------------------------------------
         // TEST 4: full-frame header/body length consistency (PR-G trim)

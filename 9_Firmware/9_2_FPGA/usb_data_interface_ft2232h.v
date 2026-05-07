@@ -44,11 +44,12 @@
  *
  *   Last byte:    0x55 (frame end footer)
  *
- * Status packet (FPGA→Host): 30 bytes (PR-G: was 26 in v1, +4 for soft tier)
+ * Status packet (FPGA→Host): 34 bytes (M-5: was 30 / PR-G; was 26 / v1)
  *   Byte 0:       0xBB (status header)
- *   Bytes 1-28:   7 × 32-bit status words, MSB first
- *                 word[6] = {detect_count_cand[15:0], detect_threshold_soft[15:0]}
- *   Byte 29:      0x55 (footer)
+ *   Bytes 1-32:   8 × 32-bit status words, MSB first
+ *                 word[6] = {detect_count_cand[15:0], detect_threshold_soft[15:0]}  (PR-G)
+ *                 word[7] = {medium_chirp[15:0], medium_listen[15:0]}               (M-5)
+ *   Byte 33:      0x55 (footer)
  *
  * Command (Host→FPGA): 4 bytes received sequentially (unchanged)
  *   Byte 0: opcode[7:0]    (see RP_OP_* in radar_params.vh)
@@ -148,6 +149,8 @@ module usb_data_interface_ft2232h (
     input wire [15:0] status_guard,
     input wire [15:0] status_short_chirp,
     input wire [15:0] status_short_listen,
+    input wire [15:0] status_medium_chirp,     // M-5: status_words[7][31:16] readback
+    input wire [15:0] status_medium_listen,    // M-5: status_words[7][15:0]  readback
     input wire [5:0]  status_chirps_per_elev,
     input wire [1:0]  status_range_mode,
     input wire        status_chirps_mismatch,  // TX-G: host requested chirps != Doppler FFT size
@@ -225,8 +228,9 @@ localparam VALID_DET_BYTES_PER_RANGE = (NUM_DOPPLER_BINS * DETECT_BITS_PER_CELL 
 localparam DETECT_SECTION_BYTES      = NUM_RANGE_BINS * VALID_DET_BYTES_PER_RANGE;          // 6144
 localparam [3:0] DET_BYTE_LAST_PER_RANGE = VALID_DET_BYTES_PER_RANGE[3:0] - 4'd1;           // 11
 
-// Status packet: 30 bytes (PR-G: 7 × 32-bit words + header + footer)
-localparam STATUS_PKT_LEN = 5'd30;
+// Status packet: 34 bytes (M-5: 8 × 32-bit words + header + footer; PR-G was 7 words / 30 B).
+// Width bumped 5→6 bits because 34 doesn't fit in 5 bits.
+localparam STATUS_PKT_LEN = 6'd34;
 
 // ============================================================================
 // WRITE FSM STATES (FPGA → Host, ft_clk domain)
@@ -698,8 +702,8 @@ always @(posedge clk or negedge reset_n) begin
     end
 end
 
-// --- Status snapshot (ft_clk domain) — PR-G: 7 words (was 6) ---
-reg [31:0] status_words [0:6];
+// --- Status snapshot (ft_clk domain) — M-5: 8 words (was 7 / PR-G; was 6 / pre-PR-G) ---
+reg [31:0] status_words [0:7];
 
 // Byte counter for write FSM (needs to be wide enough for largest section)
 reg [15:0] wr_byte_idx;
@@ -806,7 +810,7 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         det_thr_soft_sync_1   <= 17'd0;
         det_count_cand_sync_0 <= 16'd0;
         det_count_cand_sync_1 <= 16'd0;
-        for (si = 0; si < 7; si = si + 1)
+        for (si = 0; si < 8; si = si + 1)
             status_words[si] <= 32'd0;
         wr_state              <= WR_IDLE;
         wr_byte_idx           <= 16'd0;
@@ -904,6 +908,17 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
             status_words[6] <= {det_count_cand_sync_1,
                                 (det_thr_soft_sync_1[16] ? 16'hFFFF
                                                          : det_thr_soft_sync_1[15:0])};
+            // M-5 word 7: {medium_chirp[15:0], medium_listen[15:0]}.
+            // Host writes via 0x17/0x18; this readback closes the GUI's
+            // 161-µs MEDIUM PRI visibility gap that PR-G left when status word
+            // 3 ran out of reserved bits to fit a second 16-bit pair.
+            // CDC-wise this follows the same convention as long_chirp /
+            // long_listen / short_chirp / short_listen above (status_words[1..3]):
+            // direct sample of the clk-domain register on the ft_clk-domain
+            // status_req_ft strobe, accepting the same quasi-static-write
+            // assumption (host writes cycles once during init, no concurrent
+            // change during a status read).
+            status_words[7] <= {status_medium_chirp, status_medium_listen};
         end
 
         // ================================================================
@@ -1199,47 +1214,51 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                     end
                 end
 
-                // ---- Status packet: 30 bytes (PR-G v2: 7 × 32-bit words) ----
+                // ---- Status packet: 34 bytes (M-5: 8 × 32-bit words) ----
                 WR_STATUS_SEND: begin
                     if (!ft_txe_n) begin
                         ft_data_oe <= 1'b1;
                         ft_wr_n    <= 1'b0;
 
-                        case (wr_byte_idx[4:0])
-                            5'd0:  ft_data_out <= STATUS_HEADER;
-                            5'd1:  ft_data_out <= status_words[0][31:24];
-                            5'd2:  ft_data_out <= status_words[0][23:16];
-                            5'd3:  ft_data_out <= status_words[0][15:8];
-                            5'd4:  ft_data_out <= status_words[0][7:0];
-                            5'd5:  ft_data_out <= status_words[1][31:24];
-                            5'd6:  ft_data_out <= status_words[1][23:16];
-                            5'd7:  ft_data_out <= status_words[1][15:8];
-                            5'd8:  ft_data_out <= status_words[1][7:0];
-                            5'd9:  ft_data_out <= status_words[2][31:24];
-                            5'd10: ft_data_out <= status_words[2][23:16];
-                            5'd11: ft_data_out <= status_words[2][15:8];
-                            5'd12: ft_data_out <= status_words[2][7:0];
-                            5'd13: ft_data_out <= status_words[3][31:24];
-                            5'd14: ft_data_out <= status_words[3][23:16];
-                            5'd15: ft_data_out <= status_words[3][15:8];
-                            5'd16: ft_data_out <= status_words[3][7:0];
-                            5'd17: ft_data_out <= status_words[4][31:24];
-                            5'd18: ft_data_out <= status_words[4][23:16];
-                            5'd19: ft_data_out <= status_words[4][15:8];
-                            5'd20: ft_data_out <= status_words[4][7:0];
-                            5'd21: ft_data_out <= status_words[5][31:24];
-                            5'd22: ft_data_out <= status_words[5][23:16];
-                            5'd23: ft_data_out <= status_words[5][15:8];
-                            5'd24: ft_data_out <= status_words[5][7:0];
-                            5'd25: ft_data_out <= status_words[6][31:24];   // PR-G
-                            5'd26: ft_data_out <= status_words[6][23:16];   // PR-G
-                            5'd27: ft_data_out <= status_words[6][15:8];    // PR-G
-                            5'd28: ft_data_out <= status_words[6][7:0];     // PR-G
-                            5'd29: ft_data_out <= FOOTER;
+                        case (wr_byte_idx[5:0])
+                            6'd0:  ft_data_out <= STATUS_HEADER;
+                            6'd1:  ft_data_out <= status_words[0][31:24];
+                            6'd2:  ft_data_out <= status_words[0][23:16];
+                            6'd3:  ft_data_out <= status_words[0][15:8];
+                            6'd4:  ft_data_out <= status_words[0][7:0];
+                            6'd5:  ft_data_out <= status_words[1][31:24];
+                            6'd6:  ft_data_out <= status_words[1][23:16];
+                            6'd7:  ft_data_out <= status_words[1][15:8];
+                            6'd8:  ft_data_out <= status_words[1][7:0];
+                            6'd9:  ft_data_out <= status_words[2][31:24];
+                            6'd10: ft_data_out <= status_words[2][23:16];
+                            6'd11: ft_data_out <= status_words[2][15:8];
+                            6'd12: ft_data_out <= status_words[2][7:0];
+                            6'd13: ft_data_out <= status_words[3][31:24];
+                            6'd14: ft_data_out <= status_words[3][23:16];
+                            6'd15: ft_data_out <= status_words[3][15:8];
+                            6'd16: ft_data_out <= status_words[3][7:0];
+                            6'd17: ft_data_out <= status_words[4][31:24];
+                            6'd18: ft_data_out <= status_words[4][23:16];
+                            6'd19: ft_data_out <= status_words[4][15:8];
+                            6'd20: ft_data_out <= status_words[4][7:0];
+                            6'd21: ft_data_out <= status_words[5][31:24];
+                            6'd22: ft_data_out <= status_words[5][23:16];
+                            6'd23: ft_data_out <= status_words[5][15:8];
+                            6'd24: ft_data_out <= status_words[5][7:0];
+                            6'd25: ft_data_out <= status_words[6][31:24];   // PR-G
+                            6'd26: ft_data_out <= status_words[6][23:16];   // PR-G
+                            6'd27: ft_data_out <= status_words[6][15:8];    // PR-G
+                            6'd28: ft_data_out <= status_words[6][7:0];     // PR-G
+                            6'd29: ft_data_out <= status_words[7][31:24];   // M-5: medium_chirp[15:8]
+                            6'd30: ft_data_out <= status_words[7][23:16];   // M-5: medium_chirp[7:0]
+                            6'd31: ft_data_out <= status_words[7][15:8];    // M-5: medium_listen[15:8]
+                            6'd32: ft_data_out <= status_words[7][7:0];     // M-5: medium_listen[7:0]
+                            6'd33: ft_data_out <= FOOTER;
                             default: ft_data_out <= 8'h00;
                         endcase
 
-                        if (wr_byte_idx[4:0] == STATUS_PKT_LEN - 5'd1) begin
+                        if (wr_byte_idx[5:0] == STATUS_PKT_LEN - 6'd1) begin
                             wr_state    <= WR_DONE;
                             wr_byte_idx <= 16'd0;
                         end else begin

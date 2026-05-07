@@ -347,6 +347,10 @@ module tb_e2e_dsp_to_host;
         .status_guard               (16'd0),
         .status_short_chirp         (16'd0),
         .status_short_listen        (16'd0),
+        // M-5: medium PRI readback ports (A6 doesn't exercise status reads;
+        // tied off to keep DUT-port arity in sync).
+        .status_medium_chirp        (16'd0),
+        .status_medium_listen       (16'd0),
         .status_chirps_per_elev     (6'd0),
         .status_range_mode          (2'd0),
         .status_chirps_mismatch     (1'b0),
