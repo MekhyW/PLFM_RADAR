@@ -126,10 +126,10 @@ class TestRadarProtocol(unittest.TestCase):
     # ----------------------------------------------------------------
     # Status packet parsing
     # ----------------------------------------------------------------
-    def _make_status_packet(self, mode=1, stream=7, threshold=10000,
+    def _make_status_packet(self, stream=7, threshold=10000,
                             long_chirp=3000, long_listen=13700,
                             guard=17540, short_chirp=50,
-                            short_listen=17450, chirps=32, range_mode=0,
+                            short_listen=17450, chirps=32,
                             st_flags=0, st_detail=0, st_busy=0,
                             agc_gain=0, agc_peak=0, agc_sat=0, agc_enable=0,
                             chirps_mismatch=0,
@@ -139,8 +139,9 @@ class TestRadarProtocol(unittest.TestCase):
         pkt = bytearray()
         pkt.append(STATUS_HEADER_BYTE)
 
-        # Word 0: {0xFF[31:24], mode[23:22], stream[21:19], 3'b000[18:16], threshold[15:0]}
-        w0 = (0xFF << 24) | ((mode & 0x03) << 22) | ((stream & 0x07) << 19) | (threshold & 0xFFFF)
+        # Word 0: {0xFF[31:24], reserved[23:22], stream[21:19], 3'b000[18:16], threshold[15:0]}
+        # PR-AB.b expanded: bits [23:22] formerly radar_mode, now reserved 0.
+        w0 = (0xFF << 24) | ((stream & 0x07) << 19) | (threshold & 0xFFFF)
         pkt += struct.pack(">I", w0)
 
         # Word 1: {long_chirp, long_listen}
@@ -157,11 +158,11 @@ class TestRadarProtocol(unittest.TestCase):
 
         # Word 4: {agc_current_gain[3:0], agc_peak_magnitude[7:0],
         #          agc_saturation_count[7:0], agc_enable,
-        #          chirps_mismatch[10], 8'd0, range_mode[1:0]}
+        #          chirps_mismatch[10], 10'd0 reserved [9:0]}
+        # PR-AB.b expanded: bits [1:0] formerly range_mode, now reserved 0.
         w4 = (((agc_gain & 0x0F) << 28) | ((agc_peak & 0xFF) << 20) |
               ((agc_sat & 0xFF) << 12) | ((agc_enable & 0x01) << 11) |
-              ((chirps_mismatch & 0x01) << 10) |
-              (range_mode & 0x03))
+              ((chirps_mismatch & 0x01) << 10))
         pkt += struct.pack(">I", w4)
 
         # Word 5: {frame_drop[31:25], self_test_busy[24], 8'd0,
@@ -186,7 +187,6 @@ class TestRadarProtocol(unittest.TestCase):
         raw = self._make_status_packet()
         sr = RadarProtocol.parse_status_packet(raw)
         self.assertIsNotNone(sr)
-        self.assertEqual(sr.radar_mode, 1)
         self.assertEqual(sr.stream_ctrl, 7)
         self.assertEqual(sr.cfar_threshold, 10000)
         self.assertEqual(sr.long_chirp, 3000)
@@ -195,21 +195,14 @@ class TestRadarProtocol(unittest.TestCase):
         self.assertEqual(sr.short_chirp, 50)
         self.assertEqual(sr.short_listen, 17450)
         self.assertEqual(sr.chirps_per_elev, 32)
-        self.assertEqual(sr.range_mode, 0)
         self.assertEqual(sr.chirps_mismatch, 0)
-
-    def test_parse_status_range_mode(self):
-        raw = self._make_status_packet(range_mode=2)
-        sr = RadarProtocol.parse_status_packet(raw)
-        self.assertEqual(sr.range_mode, 2)
 
     def test_parse_status_chirps_mismatch(self):
         # TX-G: bit 10 of word 4 must round-trip without disturbing neighbours.
-        raw = self._make_status_packet(chirps_mismatch=1, agc_enable=1, range_mode=2)
+        raw = self._make_status_packet(chirps_mismatch=1, agc_enable=1)
         sr = RadarProtocol.parse_status_packet(raw)
         self.assertEqual(sr.chirps_mismatch, 1)
         self.assertEqual(sr.agc_enable, 1)
-        self.assertEqual(sr.range_mode, 2)
 
     def test_parse_status_too_short(self):
         # Anything under STATUS_PACKET_SIZE (34 post-M-5) must be rejected.
@@ -274,8 +267,9 @@ class TestRadarProtocol(unittest.TestCase):
             [19:12] agc_saturation_count (8-bit)
             [11]    agc_enable           (1-bit)
             [10]    chirps_mismatch      (1-bit, TX-G)
-            [9:2]   reserved             (8 bits, must be zero from builder)
-            [1:0]   range_mode           (2-bit)
+            [9:0]   reserved             (10 bits, must be zero from builder)
+                    (was [9:2] + range_mode[1:0]; range_mode retired in
+                     PR-AB.b expanded)
 
         For each field we set ONLY that field to its max, build the packet,
         parse, and assert (a) the field reads back correctly and (b) every
@@ -289,12 +283,11 @@ class TestRadarProtocol(unittest.TestCase):
             ("agc_saturation_count", "agc_sat",         12, 8, "agc_saturation_count"),
             ("agc_enable",           "agc_enable",      11, 1, "agc_enable"),
             ("chirps_mismatch",      "chirps_mismatch", 10, 1, "chirps_mismatch"),
-            ("range_mode",           "range_mode",       0, 2, "range_mode"),
         ]
-        # Sanity: layout fields + reserved [9:2] must cover exactly 32 bits.
+        # Sanity: layout fields + reserved [9:0] must cover exactly 32 bits.
         used = sum(width for _, _, _, width, _ in layout)
-        self.assertEqual(used + 8, 32,
-            "word 4 layout (incl. reserved [9:2]) must total 32 bits")
+        self.assertEqual(used + 10, 32,
+            "word 4 layout (incl. reserved [9:0]) must total 32 bits")
 
         # No two fields may overlap.
         occupied = set()
@@ -1000,18 +993,24 @@ class TestOpcodeEnum(unittest.TestCase):
             self.assertFalse(hasattr(Opcode, name),
                              f"Legacy alias Opcode.{name} should not exist")
 
-    def test_radar_mode_names(self):
-        """New canonical names must exist and match FPGA opcodes."""
-        self.assertEqual(Opcode.RADAR_MODE, 0x01)
-        self.assertEqual(Opcode.TRIGGER_PULSE, 0x02)
+    def test_basic_control_opcodes(self):
+        """Canonical basic-control opcodes (0x03/0x04) match FPGA RTL.
+
+        PR-AB.b expanded retired RADAR_MODE (0x01) and TRIGGER_PULSE (0x02);
+        the legacy-alias test below ensures they stay absent.
+        """
         self.assertEqual(Opcode.DETECT_THRESHOLD, 0x03)
         self.assertEqual(Opcode.STREAM_CONTROL, 0x04)
 
     def test_all_rtl_opcodes_present(self):
-        """Every RTL opcode (from radar_system_top.v) has a matching Opcode enum member."""
-        expected = {0x01, 0x02, 0x03, 0x04,
+        """Every RTL opcode (from radar_system_top.v) has a matching Opcode enum member.
+
+        PR-AB.b expanded: 0x01 / 0x02 / 0x20 retired from the FPGA dispatch
+        case-block; they must NOT reappear in the Opcode enum.
+        """
+        expected = {0x03, 0x04,
                     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-                    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                    0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
                     0x28, 0x29, 0x2A, 0x2B, 0x2C,
                     0x30, 0x31, 0xFF}
         enum_values = {int(m) for m in Opcode}
@@ -1093,17 +1092,17 @@ class TestAGCStatusParsing(unittest.TestCase):
         self.assertEqual(sr.agc_saturation_count, 255)
         self.assertEqual(sr.agc_enable, 1)
 
-    def test_agc_and_range_mode_coexist(self):
-        """AGC fields and range_mode occupy the same word without conflict."""
+    def test_agc_fields_coexist_with_mismatch(self):
+        """AGC fields and chirps_mismatch occupy the same word without conflict."""
         raw = self._make_status_packet(agc_gain=5, agc_peak=128,
                                        agc_sat=42, agc_enable=1,
-                                       range_mode=2)
+                                       chirps_mismatch=1)
         sr = RadarProtocol.parse_status_packet(raw)
         self.assertEqual(sr.agc_current_gain, 5)
         self.assertEqual(sr.agc_peak_magnitude, 128)
         self.assertEqual(sr.agc_saturation_count, 42)
         self.assertEqual(sr.agc_enable, 1)
-        self.assertEqual(sr.range_mode, 2)
+        self.assertEqual(sr.chirps_mismatch, 1)
 
 
 class TestAGCStatusResponseDefaults(unittest.TestCase):

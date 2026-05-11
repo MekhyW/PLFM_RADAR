@@ -124,24 +124,23 @@ class Opcode(IntEnum):
     """Host register opcodes — must match radar_system_top.v case(usb_cmd_opcode).
 
     FPGA truth table (from radar_system_top.v opcode dispatch case-block):
-        0x01  host_radar_mode          0x20  host_range_mode
-        0x02  host_trigger_pulse       0x21-0x27  CFAR / MTI / DC-notch
-        0x03  host_detect_threshold    0x28-0x2C  AGC control
-        0x04  host_stream_control      0x2D  host_cfar_alpha_soft
-        0x10  host_long_chirp_cycles   0x30  host_self_test_trigger
-        0x11  host_long_listen_cycles  0x31/0xFF  host_status_request
-        0x12  host_guard_cycles        0x32  host_adc_pwdn
-        0x13  host_short_chirp_cycles  0x33  host_adc_format
-        0x14  host_short_listen_cycles
+        0x03  host_detect_threshold    0x21-0x27  CFAR / MTI / DC-notch
+        0x04  host_stream_control      0x28-0x2C  AGC control
+        0x10  host_long_chirp_cycles   0x2D  host_cfar_alpha_soft
+        0x11  host_long_listen_cycles  0x30  host_self_test_trigger
+        0x12  host_guard_cycles        0x31/0xFF  host_status_request
+        0x13  host_short_chirp_cycles  0x32  host_adc_pwdn
+        0x14  host_short_listen_cycles 0x33  host_adc_format
         0x15  host_chirps_per_elev
         0x16  host_gain_shift
         0x17  host_medium_chirp_cycles  (PR-G G2)
         0x18  host_medium_listen_cycles (PR-G G2)
         0x19  host_subframe_enable      (PR-U / M-8 — 3-bit {LONG, MED, SHORT} mask)
+
+    PR-AB.b expanded retired opcodes 0x01 (host_radar_mode),
+    0x02 (host_trigger_pulse), 0x20 (host_range_mode).
     """
-    # --- Basic control (0x01-0x04) ---
-    RADAR_MODE          = 0x01  # 2-bit mode select
-    TRIGGER_PULSE       = 0x02  # self-clearing one-shot trigger
+    # --- Basic control (0x03-0x04) ---
     DETECT_THRESHOLD    = 0x03  # 16-bit detection threshold value
     STREAM_CONTROL      = 0x04  # 6-bit stream enable mask (FPGA: usb_cmd_value[5:0])
 
@@ -167,8 +166,8 @@ class Opcode(IntEnum):
     # otherwise be wrong when the scheduler skips a sub-frame).
     SUBFRAME_ENABLE     = 0x19
 
-    # --- Signal processing (0x20-0x27) ---
-    RANGE_MODE          = 0x20
+    # --- Signal processing (0x21-0x27;
+    #     0x20 host_range_mode retired in PR-AB.b expanded) ---
     CFAR_GUARD          = 0x21
     CFAR_TRAIN          = 0x22
     CFAR_ALPHA          = 0x23
@@ -243,7 +242,6 @@ class RadarFrame:
 @dataclass
 class StatusResponse:
     """Parsed status response from FPGA (M-5: 8-word / 34-byte packet)."""
-    radar_mode: int = 0
     stream_ctrl: int = 0
     cfar_threshold: int = 0
     long_chirp: int = 0
@@ -252,7 +250,6 @@ class StatusResponse:
     short_chirp: int = 0
     short_listen: int = 0
     chirps_per_elev: int = 0
-    range_mode: int = 0
     # Self-test results (word 5, added in Build 26)
     self_test_flags: int = 0     # 5-bit result flags [4:0]
     self_test_detail: int = 0    # 8-bit detail code [7:0]
@@ -363,10 +360,10 @@ class RadarProtocol:
             return None
 
         sr = StatusResponse()
-        # Word 0: {0xFF[31:24], mode[23:22], stream[21:19], 3'b000[18:16], threshold[15:0]}
+        # Word 0: {0xFF[31:24], reserved[23:22], stream[21:19], 3'b000[18:16], threshold[15:0]}
+        # PR-AB.b expanded: bits [23:22] formerly radar_mode, now reserved 0.
         sr.cfar_threshold = words[0] & 0xFFFF
         sr.stream_ctrl = (words[0] >> 19) & 0x07
-        sr.radar_mode = (words[0] >> 22) & 0x03
         # Word 1: {long_chirp[31:16], long_listen[15:0]}
         sr.long_listen = words[1] & 0xFFFF
         sr.long_chirp = (words[1] >> 16) & 0xFFFF
@@ -376,8 +373,8 @@ class RadarProtocol:
         # Word 3: {short_listen[31:16], 10'd0, chirps_per_elev[5:0]}
         sr.chirps_per_elev = words[3] & 0x3F
         sr.short_listen = (words[3] >> 16) & 0xFFFF
-        # Word 4 layout: gain[31:28] peak[27:20] sat[19:12] agc_en[11] mismatch[10] mode[1:0]
-        sr.range_mode = words[4] & 0x03
+        # Word 4 layout: gain[31:28] peak[27:20] sat[19:12] agc_en[11] mismatch[10] reserved[1:0]
+        # PR-AB.b expanded: bits [1:0] formerly range_mode, now reserved 0.
         sr.chirps_mismatch = (words[4] >> 10) & 0x01
         sr.agc_enable = (words[4] >> 11) & 0x01
         sr.agc_saturation_count = (words[4] >> 12) & 0xFF
@@ -1144,8 +1141,8 @@ class RadarAcquisition(threading.Thread):
                 elif ptype == "status":
                     status = RadarProtocol.parse_status_packet(raw[start:end])
                     if status is not None:
-                        log.info(f"Status: mode={status.radar_mode} "
-                                 f"stream={status.stream_ctrl}")
+                        log.info(f"Status: stream={status.stream_ctrl} "
+                                 f"chirps/elev={status.chirps_per_elev}")
                         if status.self_test_busy or status.self_test_flags:
                             log.info(f"Self-test: busy={status.self_test_busy} "
                                      f"flags=0b{status.self_test_flags:05b} "

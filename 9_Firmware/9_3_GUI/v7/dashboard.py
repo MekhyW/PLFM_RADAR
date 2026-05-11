@@ -697,13 +697,9 @@ class RadarDashboard(QMainWindow):
         btn_mode_on.clicked.connect(lambda: self._send_fpga_cmd(0x01, 1))
         op_layout.addWidget(btn_mode_on)
 
-        btn_mode_off = QPushButton("Radar Mode Off")
-        btn_mode_off.clicked.connect(lambda: self._send_fpga_cmd(0x01, 0))
-        op_layout.addWidget(btn_mode_off)
-
-        btn_trigger = QPushButton("Trigger Chirp")
-        btn_trigger.clicked.connect(lambda: self._send_fpga_cmd(0x02, 1))
-        op_layout.addWidget(btn_trigger)
+        # PR-AB.b expanded: "Radar Mode Off" (opcode 0x01) and "Trigger Chirp"
+        # (opcode 0x02) buttons retired — the FPGA-side host_radar_mode and
+        # host_trigger_pulse registers are gone. Auto-scan is the only mode.
 
         # Stream Control (3-bit mask)
         self._add_fpga_param_row(op_layout, "Stream Control", 0x04, 7, 3,
@@ -1951,12 +1947,11 @@ class RadarDashboard(QMainWindow):
         """Update FPGA status readback labels."""
         # Diagnostics tab
         lines = [
-            f"Mode: {st.radar_mode}  Stream: {st.stream_ctrl:03b}  "
-            f"Thresh: {st.cfar_threshold}",
+            f"Stream: {st.stream_ctrl:03b}  Thresh: {st.cfar_threshold}",
             f"Long Chirp: {st.long_chirp}  Listen: {st.long_listen}",
             f"Guard: {st.guard}  Short Chirp: {st.short_chirp}  "
             f"Listen: {st.short_listen}",
-            f"Chirps/Elev: {st.chirps_per_elev}  Range Mode: {st.range_mode}",
+            f"Chirps/Elev: {st.chirps_per_elev}",
         ]
         self._fpga_status_label.setText("\n".join(lines))
 
