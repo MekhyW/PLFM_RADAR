@@ -1857,15 +1857,11 @@ int main(void)
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
   DIAG("FPGA", "FPGA reset complete -- adar_tr_x driven LOW (RX commanded)");
 
-  /* F-2.1: this firmware build supports only FPGA mode 2'b01 (RP_MODE_AUTO_3KM,
-   * the cold-reset default at radar_system_top.v:1058). The MCU does not
-   * dispatch chirps -- chirp_scheduler.v owns the SHORT/MEDIUM/LONG ladder.
-   * Mode 2'b00 (STM32 pass-through) is supported on the FPGA side but is
-   * NOT implemented in this firmware: a real pass-through would need a
-   * hardware-timer-driven PD8 emitter (software delay_us is too jittery
-   * for Doppler) plus MCU<->FPGA agreement on host_chirps_per_subframe.
-   * Operators must not change host_radar_mode away from 2'b01. */
-  DIAG("FPGA", "Production mode: host_radar_mode = 2'b01 (auto-scan, FPGA-owned chirp dispatch)");
+  /* The MCU does not dispatch chirps -- chirp_scheduler.v owns the
+   * SHORT/MEDIUM/LONG ladder unconditionally. The legacy host_radar_mode
+   * register and its 2'b00 (STM32 pass-through) / 2'b10 (single-chirp debug)
+   * / 2'b11 (track dwell) branches were retired in PR-AB.b expanded commit 1
+   * (2026-05-11); auto-scan is now the only behavior. */
 
 // Initialize module IMU
   DIAG_SECTION("IMU INIT (GY-85)");

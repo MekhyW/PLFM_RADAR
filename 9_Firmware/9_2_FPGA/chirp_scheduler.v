@@ -21,8 +21,10 @@
  * host_debug_wave_sel, host_track_*) and the track watchdog were stripped
  * — see project_aeris10_mode_strip_2026-05-11.md for rationale.
  *
- * Pulse outputs (chirp_pulse, subframe_pulse, frame_pulse) are 1-cycle
- * positive pulses, not toggles.
+ * Pulse outputs (chirp_pulse, frame_pulse) are 1-cycle positive pulses, not
+ * toggles. (A `subframe_pulse` output existed previously but was unconsumed
+ * downstream — doppler_processor counts sub-frame boundaries from its own
+ * 16-chirp accumulator. Removed in PR-AB.b expanded follow-up 2026-05-11.)
  *
  * PR-AB.b expanded commit 5 — beam-ready handshake: when
  * host_handshake_enable=1, the FSM enters S_BEAM_WAIT after frame_pulse
@@ -76,10 +78,8 @@ module chirp_scheduler (
     // ====== Outputs ======
     output reg  [1:0]  wave_sel,         // canonical waveform identity
     output reg         chirp_pulse,      // 1-cycle pulse: chirp begins this clk
-    output reg         subframe_pulse,   // 1-cycle pulse: sub-frame complete
     output reg         frame_pulse,      // 1-cycle pulse: frame complete
     output reg  [5:0]  chirp_counter,    // chirp index inside current frame
-    output reg  [1:0]  subframe_id,      // 0=SHORT, 1=MEDIUM, 2=LONG
 
     // Currently selected timing for the in-flight chirp (PR-E TX async FIFO)
     output wire [15:0] cfg_chirp_cycles,
@@ -202,6 +202,8 @@ localparam [22:0] BEAM_WATCHDOG_MAX = 23'd8_000_000;
 reg [2:0]  state;
 reg [16:0] timer;             // 17 bits cover LONG+listen+guard worst case
 reg [22:0] beam_watchdog;     // counts clk cycles while in S_BEAM_WAIT
+reg [1:0]  subframe_id;       // 0=SHORT, 1=MEDIUM, 2=LONG (FSM-internal; no
+                              // downstream consumer needs it externally)
 
 // Pre-computed wires used inside the FSM advance logic so non-blocking
 // updates to subframe_id / wave_sel see the correct next value in the same
@@ -215,7 +217,6 @@ always @(posedge clk or negedge reset_n) begin
         timer          <= 17'd0;
         wave_sel       <= `RP_WAVE_SHORT;
         chirp_pulse    <= 1'b0;
-        subframe_pulse <= 1'b0;
         frame_pulse    <= 1'b0;
         chirp_counter  <= 6'd0;
         subframe_id    <= 2'd0;
@@ -229,13 +230,11 @@ always @(posedge clk or negedge reset_n) begin
         state          <= S_IDLE;
         timer          <= 17'd0;
         chirp_pulse    <= 1'b0;
-        subframe_pulse <= 1'b0;
         frame_pulse    <= 1'b0;
         beam_watchdog  <= 23'd0;
     end else begin
         // Pulses default low — set high for one cycle on relevant transitions.
         chirp_pulse    <= 1'b0;
-        subframe_pulse <= 1'b0;
         frame_pulse    <= 1'b0;
 
         case (state)
@@ -272,7 +271,6 @@ always @(posedge clk or negedge reset_n) begin
                     state         <= S_CHIRP;
                 end else begin
                     chirp_counter  <= 6'd0;
-                    subframe_pulse <= 1'b1;
                     subframe_id    <= next_sf;
                     wave_sel       <= subframe_to_wave(next_sf);
                     if (next_sf == first_sf) begin

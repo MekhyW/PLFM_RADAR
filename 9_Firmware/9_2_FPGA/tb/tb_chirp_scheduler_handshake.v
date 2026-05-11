@@ -40,10 +40,8 @@ reg         handshake_enable = 1'b0;
 
 wire [1:0]  wave_sel;
 wire        chirp_pulse;
-wire        subframe_pulse;
 wire        frame_pulse;
 wire [5:0]  chirp_counter;
-wire [1:0]  subframe_id;
 wire [15:0] cfg_chirp_cycles;
 wire [15:0] cfg_listen_cycles;
 wire [15:0] cfg_guard_cycles;
@@ -66,10 +64,8 @@ chirp_scheduler dut (
     .host_handshake_enable        (handshake_enable),
     .wave_sel                     (wave_sel),
     .chirp_pulse                  (chirp_pulse),
-    .subframe_pulse               (subframe_pulse),
     .frame_pulse                  (frame_pulse),
     .chirp_counter                (chirp_counter),
-    .subframe_id                  (subframe_id),
     .cfg_chirp_cycles             (cfg_chirp_cycles),
     .cfg_listen_cycles            (cfg_listen_cycles),
     .cfg_guard_cycles             (cfg_guard_cycles),

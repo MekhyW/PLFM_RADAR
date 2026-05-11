@@ -143,10 +143,8 @@ module radar_receiver_final (
 // no use_long_chirp shim and no mc_new_*-toggle XOR converters.
 wire [1:0] wave_sel;
 wire chirp_pulse;
-wire subframe_pulse;       // unused on RX in PR-D; doppler picks up in PR-F
-wire frame_pulse;          // unused on RX in PR-D; PR-F doppler driver
+wire frame_pulse;          // forwarded to TX-side CDC + top-level dwell-sync pin
 wire [5:0] sched_chirp_counter;
-wire [1:0] sched_subframe_id;
 wire [15:0] sched_cfg_chirp_cycles, sched_cfg_listen_cycles, sched_cfg_guard_cycles;
 
 wire [1:0] segment_request;
@@ -252,10 +250,8 @@ chirp_scheduler sched (
     .host_handshake_enable(host_handshake_enable),
     .wave_sel(wave_sel),
     .chirp_pulse(chirp_pulse),
-    .subframe_pulse(subframe_pulse),
     .frame_pulse(frame_pulse),
     .chirp_counter(sched_chirp_counter),
-    .subframe_id(sched_subframe_id),
     .cfg_chirp_cycles (sched_cfg_chirp_cycles),
     .cfg_listen_cycles(sched_cfg_listen_cycles),
     .cfg_guard_cycles (sched_cfg_guard_cycles),
