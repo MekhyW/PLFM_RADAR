@@ -768,14 +768,21 @@ def _safe_eval_int_expr(expr, **variables):
 
 def _extract_adar_helper_sites(manager_cpp, setter_names):
     """
-    For each setter, locate the body of ``void ADAR1000Manager::<setter>``
-    and return a list of (setter, base_register, offset_expr_c, stride)
-    for every ``REG_CHn_XXX + <expr>`` memory-address assignment.
+    For each setter, locate the body of ``void`` or ``bool``
+    ``ADAR1000Manager::<setter>`` and return a list of (setter,
+    base_register, offset_expr_c, stride) for every ``REG_CHn_XXX +
+    <expr>`` memory-address assignment.
+
+    The setters originally returned ``void``. After the SPI/ADC error-
+    propagation refactor they return ``bool`` so callers can observe
+    write/read failures. The body form (``REG_CHn_XXX + <expr>``,
+    ``(channel - 1) & 0x03`` mask, ``* 2`` stride for phase I/Q) is
+    unchanged.
     """
     sites = []
     for setter in setter_names:
         m = re.search(
-            rf"void\s+ADAR1000Manager::{setter}\s*\([^)]*\)\s*\{{(.+?)^\}}",
+            rf"(?:void|bool)\s+ADAR1000Manager::{setter}\s*\([^)]*\)\s*\{{(.+?)^\}}",
             manager_cpp,
             re.MULTILINE | re.DOTALL,
         )
@@ -818,9 +825,15 @@ def _extract_adar_caller_sites(sources, setter):
     call sites fit on one line; a future multi-line refactor would drop
     callers from the scan, which the round-trip test surfaces loudly via
     `assert callers` (rather than silently missing a site).
+
+    Two terminating forms are accepted:
+      * ``setter(args);``                                — standalone call.
+      * ``ok = setter(args) && ok;`` (one or more chains) — error-propagation
+        idiom introduced by the SPI/ADC refactor where setters return
+        ``bool`` and callers AND the result into a running success flag.
     """
     out = []
-    call_re = re.compile(rf"\b{setter}\s*\(([^;]*?)\)\s*;")
+    call_re = re.compile(rf"\b{setter}\s*\(([^;]*?)\)(?:\s*&&\s*\w+)*\s*;")
     for filename, text in sources:
         for line_no, line in enumerate(text.splitlines(), start=1):
             # Skip method definition / declaration lines.
