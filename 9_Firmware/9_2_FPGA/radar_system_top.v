@@ -857,20 +857,33 @@ assign usb_detect_class = rx_detect_class;  // PR-G: 2-bit class to FT2232H
 generate
 if (USB_MODE == 0) begin : gen_ft601
     // ---- FT601 USB 3.0 (32-bit, 200T premium board) ----
+    // PR-AD: brought to v2 bulk parity with FT2232H driver. All status inputs
+    // mirror the FT2232H instantiation below so the host sees the same
+    // protocol regardless of board variant.
     usb_data_interface usb_inst (
         .clk(clk_100m_buf),
         .reset_n(sys_reset_n),
         .ft601_reset_n(sys_reset_ft601_n),
-        
+
         // Radar data inputs
         .range_profile(usb_range_profile),
         .range_valid(usb_range_valid),
         .doppler_real(usb_doppler_real),
         .doppler_imag(usb_doppler_imag),
         .doppler_valid(usb_doppler_valid),
-        .cfar_detection(usb_detect_flag),
+        .cfar_detect_class(usb_detect_class),  // PR-G: 2-bit class (PR-AD)
         .cfar_valid(usb_detect_valid),
-        
+
+        // PR-AD bulk frame protocol inputs - same mux as FT2232H instance.
+        // RMW samples {range_bin_in, doppler_bin_in} when cfar_valid is high;
+        // mux cfar coords during CMP so the write address tracks cfar
+        // (not doppler's stale 511/47 idle state). Doppler-magnitude write
+        // path is gated on doppler_valid; rx_detect_valid is mutually
+        // exclusive with doppler_valid so the mux is safe in both cases.
+        .range_bin_in(rx_detect_valid ? rx_detect_range   : notched_range_bin),
+        .doppler_bin_in(rx_detect_valid ? rx_detect_doppler : notched_doppler_bin),
+        .frame_complete(rx_frame_complete),
+
         // FT601 Interface
         .ft601_data(ft601_data),
         .ft601_be(ft601_be),
@@ -886,7 +899,7 @@ if (USB_MODE == 0) begin : gen_ft601
         .ft601_swb(ft601_swb),
         .ft601_clk_out(ft601_clk_out),
         .ft601_clk_in(ft601_clk_buf),
-        
+
         // Host command outputs
         .cmd_data(usb_cmd_data),
         .cmd_valid(usb_cmd_valid),
@@ -897,6 +910,10 @@ if (USB_MODE == 0) begin : gen_ft601
         // Stream control
         .stream_control(host_stream_control),
 
+        // PR-U / M-8: per-frame snapshot of host_subframe_enable echoed in
+        // v2 frame byte 2 bits[5:3] (PR-AD parity).
+        .subframe_enable(host_subframe_enable),
+
         // Status readback inputs
         .status_request(host_status_request),
         .status_cfar_threshold(host_detect_threshold),
@@ -906,6 +923,9 @@ if (USB_MODE == 0) begin : gen_ft601
         .status_guard(host_guard_cycles),
         .status_short_chirp(host_short_chirp_cycles),
         .status_short_listen(host_short_listen_cycles),
+        // M-5: MEDIUM PRI readback in status_words[7] (PR-AD parity)
+        .status_medium_chirp(host_medium_chirp_cycles),
+        .status_medium_listen(host_medium_listen_cycles),
         .status_chirps_per_elev(host_chirps_per_elev),
         .status_chirps_mismatch(chirps_mismatch_error),
 
@@ -920,19 +940,17 @@ if (USB_MODE == 0) begin : gen_ft601
         .status_agc_saturation_count(rx_agc_saturation_count),
         .status_agc_enable(host_agc_enable),
 
-        // AUDIT-S10: control-fault flags exposed in status_words[5][6:5]
-        // for host-side observability (paired with gpio_dig7 split).
-        // PR-AB.b Step 1: feed the sticky version of the F-6.4 watchdog
-        // (level signal) so the ft_clk synchronizer cannot miss a 10 ns
-        // source-domain pulse. F-1.2 overrun is already sticky in source.
+        // AUDIT-S10: control-fault flags exposed in status_words[5][6:5].
         .status_range_decim_watchdog(rx_range_decim_watchdog_sticky),
         .status_ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun),
 
         // PR-AB.b expanded commit 5: beam-ready handshake watchdog sticky.
-        // Packed into status_words[4][1] in the FT601 path too so the host
-        // sees the same fault bit regardless of which USB build it's talking
-        // to (FT601 200T premium vs FT2232H 50T production).
-        .status_beam_handshake_watchdog(rx_beam_handshake_watchdog)
+        .status_beam_handshake_watchdog(rx_beam_handshake_watchdog),
+
+        // PR-G: 2-tier CFAR telemetry in status_words[6] (PR-AD parity).
+        .status_cfar_alpha_soft(host_cfar_alpha_soft),
+        .status_detect_threshold_soft(cfar_detect_threshold_soft),
+        .status_detect_count_cand(cfar_detect_count_cand)
     );
 
     // FT2232H ports unused in FT601 mode — tie off
