@@ -1,0 +1,148 @@
+(footprint "22-23-2021"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "KK® 254 Solid Header, Vertical, with Friction Lock, 2 Circuits, Tin (Sn) Plating\n\nDatasheet ")
+	(property "Reference" "REF**"
+		(at -2.54 -3.81 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "b2801e4d-260d-4dc6-ae2b-40fd2f8deff4")
+		(effects
+			(font
+				(size 0.9144 0.9144)
+				(thickness 0.1016)
+			)
+			(justify left bottom)
+		)
+	)
+	(property "Value" "22-23-2021"
+		(at -2.54 5.08 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "bfee2278-06cf-41b0-b151-874ede627b54")
+		(effects
+			(font
+				(size 0.9144 0.9144)
+				(thickness 0.1016)
+			)
+			(justify left bottom)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "58683355-7d71-4b36-9ef2-0c284cb33da8")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "26e7d818-6162-4cdd-a6e0-7b6f4203acca")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(fp_line
+		(start -2.54 -3.175)
+		(end 2.54 -3.175)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "ac1a3a6b-e279-4d56-b962-4ff5ef821d94")
+	)
+	(fp_line
+		(start -2.54 -1.27)
+		(end -2.54 -3.175)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "221f5845-f0ca-49c5-b267-463af9e85077")
+	)
+	(fp_line
+		(start -2.54 -1.27)
+		(end 2.54 -1.27)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "09483b5b-77ea-416c-9a2e-5adb13a16548")
+	)
+	(fp_line
+		(start -2.54 3.175)
+		(end -2.54 -1.27)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "b15c1f0c-29a5-45fe-8159-a0dfd87b6d7a")
+	)
+	(fp_line
+		(start 2.54 -3.175)
+		(end 2.54 -1.27)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "2d4fd7bb-9636-4d4b-b915-8b78b3cfcd13")
+	)
+	(fp_line
+		(start 2.54 -1.27)
+		(end 2.54 3.175)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "480efbb7-f512-4881-9259-7b40be0276b7")
+	)
+	(fp_line
+		(start 2.54 3.175)
+		(end -2.54 3.175)
+		(stroke
+			(width 0.254)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "e1b37642-11dd-494e-a7df-3336fd452523")
+	)
+	(pad "1" thru_hole oval
+		(at -1.27 0 90)
+		(size 3 1.5)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.0508)
+		(thermal_bridge_angle 0)
+		(uuid "75730391-40d9-4c61-9202-8a82abf24da0")
+	)
+	(pad "2" thru_hole oval
+		(at 1.27 0 90)
+		(size 3 1.5)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.0508)
+		(thermal_bridge_angle 0)
+		(uuid "bf68b130-fe9c-4031-bc9c-e74fd1c92b12")
+	)
+	(embedded_fonts no)
+)
