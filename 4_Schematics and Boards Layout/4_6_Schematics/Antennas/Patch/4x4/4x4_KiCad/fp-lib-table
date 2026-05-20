@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Phased_Array_Ant")(type "KiCad")(uri "$(KIPRJMOD)/Phased_Array_Ant.pretty")(options "")(descr ""))
+)
