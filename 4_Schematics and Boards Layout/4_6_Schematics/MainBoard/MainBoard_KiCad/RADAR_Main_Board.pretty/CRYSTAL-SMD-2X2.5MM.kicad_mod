@@ -1,0 +1,117 @@
+(footprint "CRYSTAL-SMD-2X2.5MM"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "2mm X 2.5mm SMD Crystal Package\n\nPhysical Characteristics\n\n• Pads size 1.2mm x 1.1mm\n• Pad Pitch (X-direction) 1.7mm\n• Pad Pitch (Y-direction) 1.4mm\n• Cut corner is on PAD 2\n• Polarity Marker is on PAD 2\n• Pad 2 and Pad 4 are grounded")
+	(property "Reference" "REF**"
+		(at 0.008 -1.776 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "5ca97efb-7f84-47dd-9cf7-f8f29e927901")
+		(effects
+			(font
+				(size 0.536448 0.536448)
+				(thickness 0.073152)
+			)
+			(justify bottom)
+		)
+	)
+	(property "Value" "CRYSTAL-SMD-2X2.5MM"
+		(at 0.008 1.672 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "6e1b9c2f-a6e6-4638-88c7-de37fbce3f0e")
+		(effects
+			(font
+				(size 0.536448 0.536448)
+				(thickness 0.073152)
+			)
+			(justify top)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "4179ddb4-3c3b-4d09-afa7-f858899ec705")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "16e603b5-708e-45c6-a292-f32f117c8091")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(fp_circle
+		(center -1.71 -1.635)
+		(end -1.629224 -1.635)
+		(stroke
+			(width 0.161553)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+		(uuid "535f359f-9ccc-48b4-ab06-14dd5fc1598e")
+	)
+	(fp_poly
+		(pts
+			(xy 1.3335 1.0795) (xy -1.3335 1.0795) (xy -1.3335 -0.534303) (xy -0.788303 -1.0795) (xy 1.3335 -1.0795)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(fill yes)
+		(layer "F.Fab")
+		(uuid "3947d307-db8b-4f75-bae9-8a9ae1cc0900")
+	)
+	(pad "P1" smd rect
+		(at 0.846 -0.69)
+		(size 1.2 1.1)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.0508)
+		(solder_paste_margin 0)
+		(thermal_bridge_angle 0)
+		(uuid "50cec597-4e06-4a44-8d86-23d6e41d5cb9")
+	)
+	(pad "P2" smd rect
+		(at -0.854 -0.69)
+		(size 1.2 1.1)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.0508)
+		(solder_paste_margin 0)
+		(thermal_bridge_angle 0)
+		(uuid "5f503f7d-0f8d-4c8f-be99-36acd304a4c7")
+	)
+	(pad "P3" smd rect
+		(at -0.854 0.71)
+		(size 1.2 1.1)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.0508)
+		(solder_paste_margin 0)
+		(thermal_bridge_angle 0)
+		(uuid "21ed86f8-f236-4380-ab1a-d8eefa203539")
+	)
+	(pad "P4" smd rect
+		(at 0.846 0.71)
+		(size 1.2 1.1)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.0508)
+		(solder_paste_margin 0)
+		(thermal_bridge_angle 0)
+		(uuid "ba58a8c3-1acf-4e65-9cf1-6c8e82cebec0")
+	)
+	(embedded_fonts no)
+)
